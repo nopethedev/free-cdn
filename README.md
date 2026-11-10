@@ -1,6 +1,6 @@
 # Cascade
 
-**A CDN-shaped file router.** Cascade is not a CDN: it is a single lightweight control plane in front of the drives you already have. Connect local disk, a FileBrowser/Quantum instance, Dropbox, Google Drive, TeraBox or any plain HTTP host, then hand out short links that either stream through this server or forward straight to the source CDN.
+**A CDN-shaped file router.** Cascade is not a CDN: it is a single lightweight control plane in front of the drives you already have. Connect local disk, S3-compatible object storage, WebDAV, a FileBrowser/Quantum instance, Dropbox, Google Drive, OneDrive, TeraBox or any plain HTTP host, then hand out short links that either stream through this server or forward straight to the source CDN.
 
 ```
 visitor ── /s/abc123 ──► Cascade range proxy ──► node connector / resolved CDN link
@@ -13,6 +13,7 @@ admin   ── /admin    ──► nodes · files · links · replication · peo
 - One short id, two delivery modes. `/s/` is a real proxy with byte-range passthrough (video seeking works). `/f/` is a 302 to the resolved direct URL, so the upstream CDN carries the transfer. Every link exposes both; the link's `mode` only decides what the bare `/{id}` does.
 - Cloud share pages become direct URLs. Dropbox share links are rewritten to `dl.dropboxusercontent.com`, Google Drive goes through its confirm/uuid flow, TeraBox is handled with a page-API resolver plus a yt-dlp fallback, and any unknown host is probed and optionally handed to `yt-dlp`.
 - FileBrowser and FileBrowser Quantum are first-class nodes: login, browse, upload, mkdir, rename, delete, download. The Quantum v2 move from `/api/raw` to `/api/resources/download` is handled by trying both routes and remembering which one works.
+- S3-compatible storage (AWS S3, Cloudflare R2, Backblaze B2, MinIO) and WebDAV (Nextcloud, ownCloud) are writable nodes. S3 forwarding uses short-lived presigned URLs; WebDAV streams through Cascade.
 - Replication is a background job with live byte progress. Copy local → FileBrowser, FileBrowser → local, local → local, and so on.
 - Multi-user with a clear split: admins manage nodes/files/settings; regular users browse read-only, download and create their own links.
 - Password links, expiry, download caps, landing pages, per-IP rate limits, an audit log, delivery events and API keys.
@@ -26,12 +27,14 @@ python3 -m venv .venv
 pip install -r requirements.txt
 
 cp .env.example .env          # optional; Cascade reads .env automatically
-# edit CASCADE_ADMIN_EMAIL / CASCADE_ADMIN_PASSWORD
+# leave the admin values blank to create the first admin through /setup
 
 python -m cascade
 ```
 
-Open <http://localhost:8000>. On a fresh database you get `/setup` and create the first admin; if `CASCADE_ADMIN_EMAIL` and `CASCADE_ADMIN_PASSWORD` are set they are seeded automatically instead.
+Open <http://localhost:8000>. On a fresh database you get `/setup` and create the first admin; if `CASCADE_ADMIN_EMAIL` and `CASCADE_ADMIN_PASSWORD` are set they are seeded automatically instead. Once any account exists, `/setup` redirects to `/login` because initialization is complete.
+
+If you already created an admin and need to start over in development, stop Cascade and remove `data/cascade.db*`; this deletes accounts and links, but not files under `data/files/`.
 
 For development with reload:
 
@@ -43,6 +46,8 @@ uvicorn cascade.main:app --reload --port 8000
 
 ```bash
 docker compose up -d --build
+# The first boot with an empty volume opens /setup. Set
+# CASCADE_ADMIN_EMAIL and CASCADE_ADMIN_PASSWORD only to seed the admin instead.
 # or
 docker build -t cascade .
 docker run -d -p 8000:8000 -v cascade-data:/data \
@@ -57,20 +62,33 @@ SQLite lives in `data/cascade.db`, local files in `data/files/`, and the signing
 
 ## Nodes
 
-A node is one place files can live. Add them under **Nodes → Add node**.
+A node is one place files can live. Add one under **Nodes → Add node**: choose a provider, give the node a name, and fill every field marked `*`. Local disk needs only a name; optional fields can stay blank and be filled in later from **Edit**. After saving, press **Test** on the node card.
 
-| Kind | Browse | Stream | Upload | Link-only | Notes |
-| --- | --- | --- | --- | --- | --- |
-| Local disk | yes | yes | yes | — | A folder inside `data/files/`. Range requests are native. |
-| FileBrowser / Quantum | yes | yes | yes | — | REST API. Needs a user with browse + create permissions. |
-| Dropbox | with token | with token | — | yes | Share links work without a token via the dl. rewrite. |
-| Google Drive | with token | with token | — | yes | Public share links resolve without a token. |
-| TeraBox | — | — | — | yes | Resolver is best-effort; a cookie helps private shares. |
-| HTTP / direct | — | yes | — | yes | Any host with plain file URLs. Optional extra headers. |
+| Kind | Browse | Stream | Upload | Notes |
+| --- | --- | --- | --- | --- |
+| Local disk | yes | yes | yes | A folder inside `data/files/`. Range requests are native. |
+| FileBrowser / Quantum | yes | yes | yes | REST API. Needs a user with browse + create permissions. |
+| S3-compatible | yes | yes | yes | AWS S3, R2, B2, MinIO. Forward links use 1-hour presigned URLs. |
+| WebDAV | yes | yes | yes | Nextcloud, ownCloud or any WebDAV folder. |
+| Dropbox | with token | with token | — | Share links work without a token via the dl. rewrite. |
+| Google Drive | with token | with token | — | Public share links resolve without a token. |
+| Microsoft OneDrive | with token | with token | — | Microsoft Graph token. Read-only. |
+| TeraBox | — | — | — | Resolver is best-effort; a cookie helps private shares. |
+| HTTP / direct | — | yes | — | Any host with plain file URLs. Optional extra headers. |
 
 ### FileBrowser / FileBrowser Quantum
 
 Point the node at the instance root, e.g. `https://files.example.com`, and give the username/password of a FileBrowser user. Cascade calls `POST /api/login`, then uses `/api/resources` for browsing, upload and mkdir, `/api/raw` or `/api/resources/download` for downloads, `PATCH /api/resources/...` with `action: rename` for moves, and `DELETE` for deletion. Quantum's v2 API is detected automatically; if downloads fail, make sure the account has download permission for the configured source.
+
+### S3-compatible object storage
+
+Use the provider's API endpoint, region, bucket and an access key/secret pair. For AWS leave the endpoint blank and choose **Virtual-hosted** addressing. For Cloudflare R2 use `https://<account>.r2.cloudflarestorage.com`, `auto` as the region and **Path-style**; MinIO and Backblaze B2 use their own endpoint and path-style addressing. An optional prefix scopes the node to a folder inside the bucket.
+
+Cascade signs its own S3 requests, so no extra SDK is required. Browsing uses `ListObjectsV2`; uploads, folders, deletes and renames use the object API. Forward links (`/f/`) receive a presigned URL valid for one hour.
+
+### WebDAV
+
+Point the node at the folder URL your WebDAV client uses and provide a username and password. For Nextcloud that is normally `https://cloud.example.com/remote.php/dav/files/<user>`. Cascade uses `PROPFIND` for listings and `GET`/`PUT`/`MKCOL`/`DELETE`/`MOVE` for file operations. WebDAV nodes do not have a public URL, so `/f/` falls back to `/s/`.
 
 ### Dropbox
 
@@ -79,6 +97,10 @@ Copy an access token from the Dropbox App Console (scopes: `files.metadata.read`
 ### Google Drive
 
 Paste an OAuth access token (scope `drive.readonly` is enough) and optionally a root folder id. Folder entries are addressed by file id, so they survive renames. Cascade does not implement an OAuth refresh flow: access tokens expire after about an hour, so paste a fresh one for browsing. Public "anyone with the link" files work without any token through the confirm/uuid resolution path.
+
+### Microsoft OneDrive
+
+Paste a Microsoft Graph access token with `Files.Read.All`, and optionally set a root folder ID. Cascade lists `/me/drive/root/children` by default and addresses folders by item ID, so renames do not break paths. Access tokens expire after about an hour and Cascade does not refresh them; paste a fresh token to reconnect. OneDrive nodes are read-only; use `/f/` for a temporary download URL or `/s/` to proxy.
 
 ### TeraBox
 
@@ -150,7 +172,7 @@ Environment variables:
 | --- | --- | --- |
 | `CASCADE_DATA_DIR` | `./data` | SQLite, local files and generated secret live here. |
 | `CASCADE_SECRET` | generated | HMAC key for link tokens. Set this for multi-instance or reproducible deployments. |
-| `CASCADE_ADMIN_EMAIL` / `CASCADE_ADMIN_PASSWORD` | empty | Seed the first admin when the users table is empty. |
+| `CASCADE_ADMIN_EMAIL` / `CASCADE_ADMIN_PASSWORD` | empty | Seed the first admin when the users table is empty. Leave blank to use `/setup`. |
 | `CASCADE_HOST` / `CASCADE_PORT` | `0.0.0.0` / `8000` | Listener used by `python -m cascade`. |
 | `CASCADE_TRUST_PROXY` | `0` | Honour `X-Forwarded-For` and uvicorn proxy headers. |
 | `CASCADE_COOKIE_SECURE` | `0` | Mark session cookies `Secure` (enable on HTTPS). |
@@ -160,7 +182,7 @@ Runtime settings (admin panel): site name, tagline, accent colour, public base U
 
 ## Security notes
 
-- Change the seeded admin password. Set `CASCADE_SECRET` when running more than one instance.
+- If you seed the admin with `CASCADE_ADMIN_EMAIL` / `CASCADE_ADMIN_PASSWORD`, change that password after first login. Set `CASCADE_SECRET` when running more than one instance.
 - Serve behind HTTPS and set `CASCADE_COOKIE_SECURE=1`; set `CASCADE_TRUST_PROXY=1` only behind a trusted reverse proxy.
 - Sessions are server-side (SQLite) with HttpOnly, SameSite=Lax cookies. Mutating API calls require a per-session CSRF token plus a same-origin check; admin pages are HTML-escaped by Jinja.
 - Passwords use PBKDF2-HMAC-SHA256 (240k iterations). Link passwords are hashed and exchanged for a short-lived HMAC token (`?t=...`) so video segment requests do not resend the password.
@@ -175,7 +197,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The suite covers range parsing, provider rewrites, the yt-dlp bridge, cache behaviour, login/CSRF, page rendering, stream and forward delivery against a live local HTTP server, password/expiry/limit links, the file browser API, replication jobs, API keys and settings validation. Tests use an isolated data directory under `tests/.data`.
+The suite covers range parsing, provider rewrites, the yt-dlp bridge, cache behaviour, login/CSRF, page rendering, stream and forward delivery against a live local HTTP server, password/expiry/limit links, the file browser API, provider configuration and validation, S3 URL signing, WebDAV URL building, replication jobs, API keys and settings validation. Tests use an isolated data directory under `tests/.data`.
 
 ## Project layout
 
@@ -189,7 +211,7 @@ cascade/
   links.py           link creation and URL helpers
   serve.py           link → stream/forward glue
   resolvers.py       Dropbox/Drive/TeraBox/yt-dlp direct URL resolution
-  nodes.py           local, FileBrowser, Dropbox, Drive, TeraBox, HTTP connectors
+  nodes.py           local, FileBrowser, S3, WebDAV, Dropbox, Drive, OneDrive, TeraBox, HTTP
   remote.py          upstream streaming with range passthrough
   jobs.py            replication worker
   routers/           auth, admin pages, JSON API, public delivery
@@ -202,9 +224,10 @@ tests/               pytest suite
 
 - TeraBox resolution depends on an undocumented frontend API and can break; use the cookie/template escape hatch or yt-dlp.
 - Google Drive browsing requires a manually supplied OAuth access token (no refresh flow).
-- Cloud nodes are read-only for uploads; replication targets must be local disk or FileBrowser.
+- Dropbox, Google Drive and OneDrive are read-only; replication targets must be local disk, FileBrowser, WebDAV or S3-compatible storage.
+- Google Drive and OneDrive tokens expire after about an hour and Cascade does not implement an OAuth refresh flow. S3 credentials and WebDAV passwords do not expire on their own.
 - Uploads in the admin panel are parsed by Starlette before being streamed to the node, so very large uploads use temporary disk space. Keep the max upload setting sane.
-- Forwarding a local or FileBrowser link is impossible without a public URL, so `/f/` falls back to `/s/`. Cloud and HTTP links forward normally.
+- Forwarding a local, FileBrowser or WebDAV link is impossible without a public URL, so `/f/` falls back to `/s/`. Cloud, S3 and HTTP links forward normally.
 - No multi-instance coordination: the job queue and rate limiter are in-process. One Cascade process per SQLite database is the intended deployment.
 
 ## License

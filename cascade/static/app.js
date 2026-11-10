@@ -148,7 +148,7 @@
       button.type = "button";
       button.className = `btn ${action.className || ""}`.trim();
       button.textContent = action.label;
-      button.addEventListener("click", () => action.onClick && action.onClick({ modal: wrap, body: bodyEl, close: closeModal }));
+      button.addEventListener("click", () => action.onClick && action.onClick({ modal: wrap, body: bodyEl, foot: footEl, close: closeModal }));
       footEl.appendChild(button);
     });
     if (!actions.length) footEl.remove();
@@ -810,28 +810,69 @@
 
   /* Nodes ------------------------------------------------------------------ */
 
-  const SECRET_KEYS = ["access_token", "password", "cookie", "token"];
+  const SECRET_KEYS = ["access_token", "password", "cookie", "token", "secret_key", "session_token"];
 
   function nodeKindMeta(kind) {
     return (C.kinds || []).find((item) => item.kind === kind) || { fields: [] };
+  }
+
+  function nodeTypeOptions() {
+    const groups = [];
+    (C.kinds || []).forEach((kind) => {
+      const name = kind.group || "Other";
+      let group = groups.find((item) => item.name === name);
+      if (!group) {
+        group = { name, kinds: [] };
+        groups.push(group);
+      }
+      group.kinds.push(kind);
+    });
+    return groups
+      .map(
+        (group) =>
+          `<optgroup label="${escapeHtml(group.name)}">${group.kinds
+            .map((kind) => `<option value="${escapeHtml(kind.kind)}">${escapeHtml(kind.label)}</option>`)
+            .join("")}</optgroup>`
+      )
+      .join("");
   }
 
   function nodeFieldsHtml(kind, config = {}, secrets = {}) {
     const meta = nodeKindMeta(kind);
     return (meta.fields || [])
       .map((field) => {
-        const isSecret = SECRET_KEYS.includes(field.key);
-        const value = config[field.key] === undefined ? "" : config[field.key];
-        const placeholder = isSecret && secrets[field.key]
+        const key = field.key;
+        const isSecret = SECRET_KEYS.includes(key);
+        const value =
+          config[key] === undefined || config[key] === null
+            ? field.default || ""
+            : config[key];
+        const placeholder = isSecret && secrets[key]
           ? "configured — leave blank to keep"
           : field.placeholder || "";
         const help = field.help ? `<small>${escapeHtml(field.help)}</small>` : "";
+        const required = field.required ? " required" : "";
+        const label = `${escapeHtml(field.label)}${field.required ? ' <em class="req">*</em>' : ' <em class="opt">optional</em>'}`;
         if (field.type === "textarea") {
-          return `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span>
-            <textarea class="input" name="cfg_${field.key}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(typeof value === "object" ? JSON.stringify(value, null, 2) : value)}</textarea>${help}</label>`;
+          return `<label class="field"><span>${label}</span>
+            <textarea class="input" name="cfg_${key}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(
+              typeof value === "object" ? JSON.stringify(value, null, 2) : value
+            )}</textarea>${help}</label>`;
         }
-        return `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span>
-          <input class="input" type="${field.type || "text"}" name="cfg_${field.key}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">${help}</label>`;
+        if (field.type === "select") {
+          const options = (field.options || [])
+            .map((option) => {
+              const selected = String(value) === String(option.value) ? " selected" : "";
+              return `<option value="${escapeHtml(option.value)}"${selected}>${escapeHtml(option.label)}</option>`;
+            })
+            .join("");
+          return `<label class="field"><span>${label}</span>
+            <select class="select" name="cfg_${key}"${required}>${options}</select>${help}</label>`;
+        }
+        return `<label class="field"><span>${label}</span>
+          <input class="input" type="${field.type || "text"}" name="cfg_${key}" value="${escapeHtml(
+            typeof value === "object" ? JSON.stringify(value) : value
+          )}" placeholder="${escapeHtml(placeholder)}"${required}>${help}</label>`;
       })
       .join("");
   }
@@ -840,14 +881,32 @@
     const editing = Boolean(node);
     const kinds = C.kinds || [];
     if (!kinds.length) return toast("Node types unavailable", "bad");
+    const initialKind = editing ? node.kind : kinds[0].kind;
+    const initialMeta = nodeKindMeta(initialKind);
     const body = `
-      <label class="field"><span>Name</span><input class="input" name="name" value="${escapeHtml(node ? node.name : "")}" placeholder="Main drive" required></label>
-      ${editing ? "" : `<label class="field"><span>Type</span><select class="select" name="kind">${kinds.map((kind) => `<option value="${kind.kind}">${escapeHtml(kind.label)}</option>`).join("")}</select></label>`}
-      <div class="node-fields form-stack" id="node-fields">${nodeFieldsHtml(editing ? node.kind : kinds[0].kind, node ? node.config : {}, node ? node.secrets : {})}</div>
-      <p class="muted tiny">${editing ? "Secrets are never sent back to the browser. Leave a secret blank to keep the saved value." : "Credentials are stored in the local SQLite database."}</p>`;
+      <div class="alert alert-bad" id="node-form-error" hidden></div>
+      <label class="field"><span>Name <em class="req">*</em></span><input class="input" name="name" value="${escapeHtml(
+        node ? node.name : ""
+      )}" placeholder="Main drive" required><small>Required. A label only you see.</small></label>
+      ${
+        editing
+          ? ""
+          : `<label class="field"><span>Provider <em class="req">*</em></span><select class="select" name="kind">${nodeTypeOptions()}</select></label>`
+      }
+      <p class="muted tiny" id="node-kind-help">${escapeHtml(initialMeta.blurb || "")}</p>
+      <div class="node-fields form-stack" id="node-fields">${nodeFieldsHtml(
+        initialKind,
+        node ? node.config : {},
+        node ? node.secrets : {}
+      )}</div>
+      <p class="muted tiny">${
+        editing
+          ? "Secrets are never sent back to the browser. Leave a secret blank to keep the saved value."
+          : "Fields marked * are required. Leave the optional ones blank; credentials are stored in the local SQLite database."
+      }</p>`;
     const modal = openModal({
       title: editing ? `Edit ${node.name}` : "Add a node",
-      subtitle: editing ? "Change credentials or endpoints" : "One place files can live",
+      subtitle: editing ? "Change credentials or endpoints" : "Pick a provider, give it a name, then test it",
       body,
       actions: [
         { label: "Cancel", className: "btn-ghost", onClick: () => modal.close() },
@@ -855,8 +914,19 @@
           label: editing ? "Save node" : "Add node",
           className: "btn-primary",
           onClick: async ({ body: bodyEl, foot }) => {
-            const name = bodyEl.querySelector("[name=name]").value.trim();
-            if (!name) return toast("Give the node a name", "bad");
+            const errorEl = bodyEl.querySelector("#node-form-error");
+            const showError = (message) => {
+              if (errorEl) {
+                errorEl.textContent = message;
+                errorEl.hidden = false;
+              }
+              toast(message, "bad");
+            };
+            const nameInput = bodyEl.querySelector("[name=name]");
+            const kindSelect = bodyEl.querySelector("[name=kind]");
+            const kind = editing ? node.kind : kindSelect.value;
+            const meta = nodeKindMeta(kind);
+            const name = nameInput.value.trim();
             const config = {};
             $$("[name^=cfg_]", bodyEl).forEach((input) => {
               const key = input.name.slice(4);
@@ -864,10 +934,29 @@
               if (value === "" && SECRET_KEYS.includes(key)) return;
               config[key] = value;
             });
+            const missing = [];
+            let firstMissing = null;
+            if (!name) {
+              missing.push("Name");
+              firstMissing = nameInput;
+            }
+            (meta.fields || []).forEach((field) => {
+              if (!field.required) return;
+              const input = bodyEl.querySelector(`[name="cfg_${field.key}"]`);
+              if (!input || !String(input.value || "").trim()) {
+                missing.push(field.label);
+                if (!firstMissing) firstMissing = input;
+              }
+            });
+            if (missing.length) {
+              showError(`Fill in: ${missing.join(", ")}.`);
+              if (firstMissing) firstMissing.focus();
+              return;
+            }
             const payload = { name };
             if (editing) payload.config = config;
             else {
-              payload.kind = bodyEl.querySelector("[name=kind]").value;
+              payload.kind = kind;
               payload.config = config;
             }
             await busy(foot.querySelector(".btn-primary"), async () => {
@@ -880,17 +969,25 @@
                 toast(editing ? "Node saved" : "Node added");
                 setTimeout(() => location.reload(), 350);
               } catch (err) {
-                toast(err.message, "bad");
+                showError(err.message);
               }
             });
           },
         },
       ],
     });
+    const errorEl = modal.body.querySelector("#node-form-error");
+    modal.body.addEventListener("input", () => {
+      if (errorEl) errorEl.hidden = true;
+    });
     const kindSelect = modal.body.querySelector("[name=kind]");
     if (kindSelect) {
       kindSelect.addEventListener("change", () => {
+        const meta = nodeKindMeta(kindSelect.value);
+        const help = $("#node-kind-help", modal.body);
+        if (help) help.textContent = meta.blurb || "";
         $("#node-fields", modal.body).innerHTML = nodeFieldsHtml(kindSelect.value);
+        if (errorEl) errorEl.hidden = true;
       });
     }
   }

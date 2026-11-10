@@ -16,16 +16,21 @@ links resolve through `resolvers.resolve_direct`.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
 import shutil
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import httpx
 
@@ -93,9 +98,12 @@ def _parse_time(value: Any) -> int | None:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         try:
-            parsed = datetime.fromisoformat(text.split(".")[0] + "+00:00")
-        except ValueError:
-            return None
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            try:
+                parsed = datetime.fromisoformat(text.split(".")[0] + "+00:00")
+            except ValueError:
+                return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return int(parsed.timestamp())
@@ -986,6 +994,816 @@ class GDriveConnector(Connector):
         )
 
 
+class _BodyStream(httpx.AsyncByteStream):
+    """An async request body with a known length, used for uploads."""
+
+    def __init__(self, body: AsyncIterator[bytes], length: int | None = None) -> None:
+        self.body = body
+        self.length = length
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self.body:
+            if chunk:
+                yield chunk
+
+
+def _local_tag(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _xml_error(content: bytes) -> str:
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return content.decode("utf-8", "replace")[:300]
+    for element in root.iter():
+        if _local_tag(element.tag) == "Message" and element.text:
+            return element.text[:300]
+        if _local_tag(element.tag) == "Code" and element.text:
+            return element.text[:300]
+    return "upstream storage request failed"
+
+
+# ---------------------------------------------------------------------------
+# S3-compatible object storage
+# ---------------------------------------------------------------------------
+
+
+class S3Connector(Connector):
+    """AWS S3, Cloudflare R2, Backblaze B2, MinIO and other S3-compatible APIs."""
+
+    kind = "s3"
+    capabilities = {"list", "read", "write", "direct"}
+
+    def __init__(self, node) -> None:
+        super().__init__(node)
+        self.endpoint = str(self.config.get("endpoint") or "").strip().rstrip("/")
+        self.region = str(self.config.get("region") or "us-east-1").strip() or "us-east-1"
+        self.bucket = str(self.config.get("bucket") or "").strip()
+        self.access_key = str(self.config.get("access_key") or "").strip()
+        self.secret_key = str(self.config.get("secret_key") or "").strip()
+        self.session_token = str(self.config.get("session_token") or "").strip()
+        self.prefix = normalize_path(str(self.config.get("prefix") or "")).strip("/")
+        self.path_style = str(self.config.get("path_style") or "path").strip().lower() != "virtual"
+
+    def _endpoint(self) -> str:
+        if not self.endpoint:
+            return f"https://s3.{self.region}.amazonaws.com"
+        parts = urlsplit(self.endpoint)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise NodeError("S3 endpoint must start with http:// or https://")
+        return self.endpoint
+
+    def _host(self) -> str:
+        return urlsplit(self._endpoint()).netloc
+
+    def _bucket_url(self) -> str:
+        endpoint = self._endpoint()
+        if self.path_style:
+            return f"{endpoint}/{quote(self.bucket)}"
+        parts = urlsplit(endpoint)
+        return f"{parts.scheme}://{self.bucket}.{parts.netloc}"
+
+    def _ensure_credentials(self) -> None:
+        if not self.bucket or not self.access_key or not self.secret_key:
+            raise NodeError("S3 bucket, access key and secret key are required")
+
+    def _object_key(self, path: str) -> str:
+        path = normalize_path(path)
+        relative = path.strip("/")
+        if self.prefix and relative:
+            return f"{self.prefix}/{relative}"
+        return self.prefix or relative
+
+    def _list_prefix(self, path: str) -> str:
+        base = self._object_key(path)
+        return f"{base}/" if base else ""
+
+    def _url_for_key(self, key: str | None) -> str:
+        base = self._bucket_url()
+        if key is None:
+            return base
+        return f"{base}/{quote(key, safe='/-_.~')}"
+
+    def _canonical_uri(self, key: str | None) -> str:
+        if key is None:
+            return f"/{self.bucket}" if self.path_style else "/"
+        encoded = quote(key, safe="/-_.~")
+        return f"/{self.bucket}/{encoded}" if self.path_style else f"/{encoded}"
+
+    @staticmethod
+    def _canonical_query(params: dict[str, Any]) -> str:
+        return "&".join(
+            f"{quote(str(key), safe='-_.~')}={quote(str(value), safe='-_.~')}"
+            for key, value in sorted(params.items())
+        )
+
+    @staticmethod
+    def _amz_dates() -> tuple[str, str]:
+        current = datetime.now(timezone.utc)
+        return current.strftime("%Y%m%dT%H%M%SZ"), current.strftime("%Y%m%d")
+
+    def _signing_key(self, date_stamp: str) -> bytes:
+        key = ("AWS4" + self.secret_key).encode("utf-8")
+        for part in (date_stamp, self.region, "s3", "aws4_request"):
+            key = hmac.new(key, part.encode("utf-8"), hashlib.sha256).digest()
+        return key
+
+    def _signature(
+        self,
+        method: str,
+        canonical_uri: str,
+        canonical_query: str,
+        canonical_headers: str,
+        signed_headers: str,
+        payload_hash: str,
+        amz_date: str,
+        date_stamp: str,
+    ) -> str:
+        scope = f"{date_stamp}/{self.region}/s3/aws4_request"
+        canonical_request = "\n".join(
+            (method, canonical_uri, canonical_query, canonical_headers, signed_headers, payload_hash)
+        )
+        string_to_sign = "\n".join(
+            (
+                "AWS4-HMAC-SHA256",
+                amz_date,
+                scope,
+                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+            )
+        )
+        return hmac.new(
+            self._signing_key(date_stamp), string_to_sign.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+
+    def _signed_headers(
+        self, method: str, key: str, payload_hash: str, extra: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        self._ensure_credentials()
+        amz_date, date_stamp = self._amz_dates()
+        headers = {
+            "host": self._host(),
+            "x-amz-content-sha256": payload_hash,
+            "x-amz-date": amz_date,
+        }
+        if self.session_token:
+            headers["x-amz-security-token"] = self.session_token
+        if extra:
+            headers.update({name.lower(): str(value) for name, value in extra.items()})
+        canonical_headers = "".join(
+            f"{name}:{value.strip()}\n" for name, value in sorted(headers.items())
+        )
+        signed_headers = ";".join(sorted(headers))
+        signature = self._signature(
+            method,
+            self._canonical_uri(key),
+            "",
+            canonical_headers,
+            signed_headers,
+            payload_hash,
+            amz_date,
+            date_stamp,
+        )
+        scope = f"{date_stamp}/{self.region}/s3/aws4_request"
+        output = {name: value for name, value in headers.items() if name != "host"}
+        output["authorization"] = (
+            f"AWS4-HMAC-SHA256 Credential={self.access_key}/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        return output
+
+    def _presign(self, method: str, key: str | None, query: dict[str, Any] | None = None, expires: int = 3600) -> str:
+        self._ensure_credentials()
+        amz_date, date_stamp = self._amz_dates()
+        scope = f"{date_stamp}/{self.region}/s3/aws4_request"
+        params: dict[str, Any] = {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"{self.access_key}/{scope}",
+            "X-Amz-Date": amz_date,
+            "X-Amz-Expires": str(expires),
+            "X-Amz-SignedHeaders": "host",
+        }
+        if self.session_token:
+            params["X-Amz-Security-Token"] = self.session_token
+        if query:
+            params.update(query)
+        canonical_query = self._canonical_query(params)
+        canonical_headers = f"host:{self._host()}\n"
+        signature = self._signature(
+            method,
+            self._canonical_uri(key),
+            canonical_query,
+            canonical_headers,
+            "host",
+            "UNSIGNED-PAYLOAD",
+            amz_date,
+            date_stamp,
+        )
+        params["X-Amz-Signature"] = signature
+        return f"{self._url_for_key(key)}?{self._canonical_query(params)}"
+
+    def _error(self, response: httpx.Response) -> str:
+        return _xml_error(response.content) if response.content else f"HTTP {response.status_code}"
+
+    async def _list_page(
+        self, prefix: str, delimiter: str | None, token: str | None = None
+    ) -> tuple[list[dict[str, str]], list[str], str | None]:
+        params: dict[str, Any] = {"list-type": "2", "prefix": prefix, "max-keys": "1000"}
+        if delimiter:
+            params["delimiter"] = delimiter
+        if token:
+            params["continuation-token"] = token
+        url = self._presign("GET", None, params)
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise NodeError(f"S3 request failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise NodeError(f"S3 returned HTTP {response.status_code}: {self._error(response)}")
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise NodeError("S3 returned invalid XML") from exc
+        objects: list[dict[str, str]] = []
+        folders: list[str] = []
+        next_token: str | None = None
+        for element in root:
+            tag = _local_tag(element.tag)
+            if tag == "Contents":
+                values = {
+                    _local_tag(child.tag): child.text or "" for child in element
+                }
+                objects.append(values)
+            elif tag == "CommonPrefixes":
+                child = next(
+                    (item for item in element if _local_tag(item.tag) == "Prefix"), None
+                )
+                if child is not None and child.text:
+                    folders.append(child.text)
+            elif tag == "NextContinuationToken":
+                next_token = element.text or None
+        truncated = any(
+            _local_tag(element.tag) == "IsTruncated"
+            and (element.text or "").lower() == "true"
+            for element in root
+        )
+        return objects, folders, next_token if truncated else None
+
+    async def _all_keys(self, prefix: str) -> list[str]:
+        keys: list[str] = []
+        token: str | None = None
+        for _ in range(50):
+            objects, _folders, token = await self._list_page(prefix, None, token)
+            keys.extend(item.get("Key", "") for item in objects if item.get("Key"))
+            if not token:
+                break
+        return keys
+
+    async def _head_exists(self, key: str) -> bool:
+        url = self._presign("HEAD", key)
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.head(url)
+        except httpx.HTTPError as exc:
+            raise NodeError(f"S3 request failed: {exc}") from exc
+        if response.status_code in (200, 204):
+            return True
+        if response.status_code == 404:
+            return False
+        raise NodeError(f"S3 returned HTTP {response.status_code}: {self._error(response)}")
+
+    async def _delete_key(self, key: str) -> None:
+        url = self._presign("DELETE", key)
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.delete(url)
+        except httpx.HTTPError as exc:
+            raise NodeError(f"S3 delete failed: {exc}") from exc
+        if response.status_code >= 400 and response.status_code != 404:
+            raise NodeError(f"S3 delete failed: {self._error(response)}")
+
+    async def _copy_key(self, source: str, destination: str) -> None:
+        source_header = f"/{self.bucket}/{quote(source, safe='/-_.~')}"
+        payload_hash = hashlib.sha256(b"").hexdigest()
+        headers = self._signed_headers(
+            "PUT",
+            destination,
+            payload_hash,
+            {
+                "content-length": "0",
+                "x-amz-copy-source": source_header,
+                "x-amz-metadata-directive": "COPY",
+            },
+        )
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                response = await client.put(
+                    self._url_for_key(destination), headers=headers, content=b""
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"S3 copy failed: {exc}") from exc
+        if response.status_code >= 300:
+            raise NodeError(f"S3 copy failed: {self._error(response)}")
+        if b"<Error>" in response.content:
+            raise NodeError(f"S3 copy failed: {_xml_error(response.content)}")
+
+    async def ping(self) -> tuple[bool, str]:
+        try:
+            self._ensure_credentials()
+            url = self._presign("HEAD", None)
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.head(url)
+            if response.status_code in (200, 204):
+                return True, f"bucket {self.bucket} reachable"
+            if response.status_code == 403:
+                return False, "credentials do not allow bucket access"
+            return False, f"HTTP {response.status_code}"
+        except (NodeError, httpx.HTTPError) as exc:
+            return False, str(exc)
+
+    async def list(self, path: str) -> list[FileItem]:
+        path = normalize_path(path)
+        list_prefix = self._list_prefix(path)
+        items: list[FileItem] = []
+        seen: set[str] = set()
+        token: str | None = None
+        for _ in range(20):
+            objects, folders, token = await self._list_page(list_prefix, "/", token)
+            for entry in objects:
+                key = entry.get("Key", "")
+                relative = key[len(list_prefix):] if key.startswith(list_prefix) else ""
+                if not relative or relative.endswith("/") or "/" in relative:
+                    continue
+                virtual_path = join_path(path, relative)
+                if virtual_path in seen:
+                    continue
+                seen.add(virtual_path)
+                try:
+                    size = int(entry.get("Size") or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                items.append(
+                    FileItem(
+                        name=relative,
+                        path=virtual_path,
+                        size=size,
+                        modified=_parse_time(entry.get("LastModified")),
+                        mime=guess_mime(relative),
+                    )
+                )
+            for folder in folders:
+                relative = folder[len(list_prefix):].rstrip("/") if folder.startswith(list_prefix) else ""
+                if not relative or "/" in relative:
+                    continue
+                virtual_path = join_path(path, relative)
+                if virtual_path in seen:
+                    continue
+                seen.add(virtual_path)
+                items.append(
+                    FileItem(
+                        name=relative,
+                        path=virtual_path,
+                        is_dir=True,
+                        mime="inode/directory",
+                    )
+                )
+            if not token:
+                break
+        items.sort(key=lambda item: (not item.is_dir, item.name.lower()))
+        return items
+
+    async def fetch(self, path: str, range_header: str | None = None) -> Fetch:
+        key = self._object_key(path)
+        if not key:
+            raise NodeError("choose a file, not the bucket root")
+        try:
+            return await open_remote(
+                self._presign("GET", key),
+                range_header=range_header,
+                filename=base_name(path) or "download",
+                mime=guess_mime(base_name(path)),
+            )
+        except Exception as exc:
+            raise NodeError(f"S3 download failed: {exc}") from exc
+
+    async def direct(self, path: str) -> Resolved | None:
+        key = self._object_key(path)
+        if not key:
+            return None
+        return Resolved(url=self._presign("GET", key), provider="s3", public=True)
+
+    async def upload(
+        self,
+        path: str,
+        body: AsyncIterator[bytes],
+        size: int | None = None,
+        mime: str | None = None,
+    ) -> int:
+        key = self._object_key(path)
+        if not key or normalize_path(path) == "/":
+            raise NodeError("choose a file path")
+        if size is None:
+            raise NodeError("S3 uploads need a known file size")
+        headers = self._signed_headers(
+            "PUT", key, "UNSIGNED-PAYLOAD", {"content-length": str(size)}
+        )
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600, connect=30)) as client:
+                response = await client.put(
+                    self._url_for_key(key), headers=headers, content=_BodyStream(body, size)
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"S3 upload failed: {exc}") from exc
+        if response.status_code >= 300:
+            raise NodeError(f"S3 upload failed: {self._error(response)}")
+        return size
+
+    async def _put_bytes(self, key: str, data: bytes) -> None:
+        payload_hash = hashlib.sha256(data).hexdigest()
+        headers = self._signed_headers(
+            "PUT", key, payload_hash, {"content-length": str(len(data))}
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.put(self._url_for_key(key), headers=headers, content=data)
+        except httpx.HTTPError as exc:
+            raise NodeError(f"S3 request failed: {exc}") from exc
+        if response.status_code >= 300:
+            raise NodeError(f"S3 request failed: {self._error(response)}")
+
+    async def mkdir(self, path: str) -> None:
+        key = self._object_key(path)
+        if not key or normalize_path(path) == "/":
+            raise NodeError("choose a folder path")
+        await self._put_bytes(key.rstrip("/") + "/", b"")
+
+    async def delete(self, path: str) -> None:
+        key = self._object_key(path)
+        if not key or normalize_path(path) == "/":
+            raise NodeError("refusing to delete the bucket root")
+        keys = await self._all_keys(key.rstrip("/") + "/")
+        if keys:
+            for item in keys:
+                await self._delete_key(item)
+            return
+        if not await self._head_exists(key):
+            raise NodeError("file not found")
+        await self._delete_key(key)
+
+    async def rename(self, path: str, new_path: str) -> None:
+        source = self._object_key(path)
+        destination = self._object_key(new_path)
+        if not source or not destination or source == destination:
+            return
+        prefix = source.rstrip("/") + "/"
+        keys = await self._all_keys(prefix)
+        if keys:
+            for item in keys:
+                suffix = item[len(prefix):]
+                await self._copy_key(item, destination.rstrip("/") + "/" + suffix)
+            for item in keys:
+                await self._delete_key(item)
+            return
+        if not await self._head_exists(source):
+            raise NodeError("file not found")
+        await self._copy_key(source, destination)
+        await self._delete_key(source)
+
+
+# ---------------------------------------------------------------------------
+# WebDAV (Nextcloud, ownCloud, generic)
+# ---------------------------------------------------------------------------
+
+
+class WebDAVConnector(Connector):
+    kind = "webdav"
+    capabilities = {"list", "read", "write"}
+    PROPFIND_BODY = (
+        b'<?xml version="1.0"?>'
+        b'<d:propfind xmlns:d="DAV:"><d:prop>'
+        b'<d:displayname/><d:resourcetype/><d:getcontentlength/>'
+        b'<d:getlastmodified/><d:getcontenttype/>'
+        b'</d:prop></d:propfind>'
+    )
+
+    def __init__(self, node) -> None:
+        super().__init__(node)
+        self.username = str(self.config.get("username") or "")
+        self.password = str(self.config.get("password") or "")
+
+    def _base(self) -> str:
+        base = str(self.config.get("base_url") or "").strip().rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            raise NodeError("WebDAV URL must start with http:// or https://")
+        return base
+
+    def _auth_headers(self) -> dict[str, str]:
+        raw = f"{self.username}:{self.password}".encode("utf-8")
+        return {"Authorization": "Basic " + base64.b64encode(raw).decode("ascii")}
+
+    def _url(self, path: str) -> str:
+        normalized = normalize_path(path)
+        relative = quote(normalized.lstrip("/"), safe="/-_.~")
+        return f"{self._base()}/{relative}" if relative else f"{self._base()}/"
+
+    def _client(self, timeout: float = 60) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=20, read=None),
+            follow_redirects=True,
+        )
+
+    async def ping(self) -> tuple[bool, str]:
+        try:
+            async with self._client(20) as client:
+                response = await client.request(
+                    "PROPFIND",
+                    self._url("/"),
+                    headers={**self._auth_headers(), "Depth": "0", "Content-Type": "application/xml"},
+                    content=self.PROPFIND_BODY,
+                )
+            if response.status_code in (200, 207):
+                return True, "WebDAV reachable"
+            return False, _http_error_message(response, f"HTTP {response.status_code}")
+        except (NodeError, httpx.HTTPError) as exc:
+            return False, str(exc)
+
+    async def list(self, path: str) -> list[FileItem]:
+        try:
+            async with self._client(30) as client:
+                response = await client.request(
+                    "PROPFIND",
+                    self._url(path),
+                    headers={**self._auth_headers(), "Depth": "1", "Content-Type": "application/xml"},
+                    content=self.PROPFIND_BODY,
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"WebDAV request failed: {exc}") from exc
+        if response.status_code not in (200, 207):
+            raise NodeError(_http_error_message(response, f"WebDAV returned HTTP {response.status_code}"))
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise NodeError("WebDAV returned invalid XML") from exc
+        base_path = unquote(urlsplit(self._base()).path).rstrip("/")
+        items: list[FileItem] = []
+        for node in root:
+            if _local_tag(node.tag) != "response":
+                continue
+            href_element = next(
+                (child for child in node if _local_tag(child.tag) == "href"), None
+            )
+            if href_element is None or not href_element.text:
+                continue
+            href_path = unquote(urlsplit(href_element.text).path)
+            if base_path and href_path.startswith(base_path):
+                relative = href_path[len(base_path):].strip("/")
+            else:
+                relative = href_path.strip("/")
+            if not relative:
+                continue
+            name = relative.rsplit("/", 1)[-1]
+            if not name:
+                continue
+            props: dict[str, str] = {}
+            for element in node.iter():
+                tag = _local_tag(element.tag)
+                if tag in ("getcontentlength", "getlastmodified", "getcontenttype"):
+                    props[tag] = element.text or ""
+            resource_type = next(
+                (element for element in node.iter() if _local_tag(element.tag) == "resourcetype"),
+                None,
+            )
+            is_dir = resource_type is not None and any(
+                _local_tag(child.tag) == "collection" for child in resource_type
+            )
+            try:
+                size = int(props.get("getcontentlength") or 0)
+            except ValueError:
+                size = 0
+            items.append(
+                FileItem(
+                    name=name,
+                    path=join_path(path, name),
+                    is_dir=is_dir,
+                    size=0 if is_dir else size,
+                    modified=_parse_time(props.get("getlastmodified")),
+                    mime="inode/directory"
+                    if is_dir
+                    else (props.get("getcontenttype") or guess_mime(name)),
+                )
+            )
+        items.sort(key=lambda item: (not item.is_dir, item.name.lower()))
+        return items
+
+    async def fetch(self, path: str, range_header: str | None = None) -> Fetch:
+        try:
+            return await open_remote(
+                self._url(path),
+                headers=self._auth_headers(),
+                range_header=range_header,
+                filename=base_name(path) or "download",
+                mime=guess_mime(base_name(path)),
+            )
+        except Exception as exc:
+            raise NodeError(f"WebDAV download failed: {exc}") from exc
+
+    async def upload(
+        self,
+        path: str,
+        body: AsyncIterator[bytes],
+        size: int | None = None,
+        mime: str | None = None,
+    ) -> int:
+        headers = self._auth_headers()
+        if mime:
+            headers["Content-Type"] = mime
+        if size is not None:
+            headers["Content-Length"] = str(size)
+        try:
+            async with self._client(3600) as client:
+                response = await client.put(
+                    self._url(path), headers=headers, content=_BodyStream(body, size)
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"WebDAV upload failed: {exc}") from exc
+        if response.status_code >= 300:
+            raise NodeError(_http_error_message(response, f"WebDAV upload failed: HTTP {response.status_code}"))
+        return size if size is not None else 0
+
+    async def mkdir(self, path: str) -> None:
+        try:
+            async with self._client(30) as client:
+                response = await client.request(
+                    "MKCOL",
+                    self._url(path) + "/",
+                    headers=self._auth_headers(),
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"WebDAV mkdir failed: {exc}") from exc
+        if response.status_code == 405:
+            return
+        if response.status_code >= 300:
+            raise NodeError(_http_error_message(response, f"WebDAV mkdir failed: HTTP {response.status_code}"))
+
+    async def delete(self, path: str) -> None:
+        try:
+            async with self._client(30) as client:
+                response = await client.delete(self._url(path), headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise NodeError(f"WebDAV delete failed: {exc}") from exc
+        if response.status_code >= 300:
+            raise NodeError(_http_error_message(response, f"WebDAV delete failed: HTTP {response.status_code}"))
+
+    async def rename(self, path: str, new_path: str) -> None:
+        headers = {
+            **self._auth_headers(),
+            "Destination": self._url(new_path),
+            "Overwrite": "F",
+        }
+        try:
+            async with self._client(30) as client:
+                response = await client.request("MOVE", self._url(path), headers=headers)
+        except httpx.HTTPError as exc:
+            raise NodeError(f"WebDAV rename failed: {exc}") from exc
+        if response.status_code >= 300:
+            raise NodeError(_http_error_message(response, f"WebDAV rename failed: HTTP {response.status_code}"))
+
+
+# ---------------------------------------------------------------------------
+# Microsoft OneDrive
+# ---------------------------------------------------------------------------
+
+
+class OneDriveConnector(Connector):
+    kind = "onedrive"
+    capabilities = {"list", "read", "direct"}
+    API = "https://graph.microsoft.com/v1.0"
+
+    def __init__(self, node) -> None:
+        super().__init__(node)
+        self.token = str(self.config.get("access_token") or "").strip()
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
+
+    def _id(self, path: str) -> str:
+        normalized = normalize_path(path)
+        if normalized == "/":
+            return str(self.config.get("folder_id") or "root")
+        return normalized.strip("/").rsplit("/", 1)[-1]
+
+    def _children_url(self, folder_id: str) -> str:
+        if folder_id == "root":
+            return f"{self.API}/me/drive/root/children"
+        return f"{self.API}/me/drive/items/{quote(folder_id, safe='')}/children"
+
+    async def ping(self) -> tuple[bool, str]:
+        if not self.token:
+            return False, "OneDrive access token is required"
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(
+                    f"{self.API}/me/drive", params={"$select": "id,driveType,owner"}, headers=self._headers()
+                )
+        except httpx.HTTPError as exc:
+            return False, str(exc)
+        if response.status_code >= 400:
+            return False, _http_error_message(response, f"HTTP {response.status_code}")
+        return True, "connected to OneDrive"
+
+    async def list(self, path: str) -> list[FileItem]:
+        if not self.token:
+            raise NodeError("OneDrive access token is required")
+        folder_id = self._id(path)
+        url = self._children_url(folder_id)
+        params = {
+            "$top": "200",
+            "$select": "id,name,size,folder,file,lastModifiedDateTime",
+        }
+        entries: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(url, params=params, headers=self._headers())
+                for _ in range(5):
+                    if response.status_code >= 400:
+                        raise NodeError(
+                            _http_error_message(response, f"OneDrive returned HTTP {response.status_code}")
+                        )
+                    data = response.json()
+                    entries.extend(data.get("value", []))
+                    next_link = data.get("@odata.nextLink")
+                    if not next_link:
+                        break
+                    response = await client.get(next_link, headers=self._headers())
+        except httpx.HTTPError as exc:
+            raise NodeError(f"OneDrive request failed: {exc}") from exc
+        items: list[FileItem] = []
+        for entry in entries:
+            item_id = str(entry.get("id") or "")
+            name = str(entry.get("name") or item_id)
+            if not item_id:
+                continue
+            is_dir = "folder" in entry
+            file_info = entry.get("file") if isinstance(entry.get("file"), dict) else {}
+            try:
+                size = int(entry.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            items.append(
+                FileItem(
+                    name=name,
+                    path=join_path(path, item_id),
+                    is_dir=is_dir,
+                    size=0 if is_dir else size,
+                    modified=_parse_time(entry.get("lastModifiedDateTime")),
+                    mime="inode/directory" if is_dir else str(file_info.get("mimeType") or guess_mime(name)),
+                )
+            )
+        items.sort(key=lambda item: (not item.is_dir, item.name.lower()))
+        return items
+
+    async def fetch(self, path: str, range_header: str | None = None) -> Fetch:
+        if not self.token:
+            raise NodeError("OneDrive access token is required")
+        item_id = self._id(path)
+        if item_id == "root":
+            raise NodeError("choose a file, not the drive root")
+        url = f"{self.API}/me/drive/items/{quote(item_id, safe='')}/content"
+        try:
+            return await open_remote(
+                url,
+                headers=self._headers(),
+                range_header=range_header,
+                filename=base_name(path) or "download",
+                mime=guess_mime(base_name(path)),
+            )
+        except Exception as exc:
+            raise NodeError(f"OneDrive download failed: {exc}") from exc
+
+    async def direct(self, path: str) -> Resolved | None:
+        if not self.token:
+            return None
+        item_id = self._id(path)
+        if item_id == "root":
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(
+                    f"{self.API}/me/drive/items/{quote(item_id, safe='')}",
+                    params={"$select": "@microsoft.graph.downloadUrl"},
+                    headers=self._headers(),
+                )
+                if response.status_code >= 400:
+                    return None
+                url = response.json().get("@microsoft.graph.downloadUrl")
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not url:
+            return None
+        return Resolved(url=url, provider="onedrive", public=True)
+
+
 # ---------------------------------------------------------------------------
 # Link-only providers
 # ---------------------------------------------------------------------------
@@ -1065,6 +1883,7 @@ class HttpConnector(Connector):
 NODE_KINDS: dict[str, dict[str, Any]] = {
     "local": {
         "label": "Local disk",
+        "group": "Local",
         "blurb": "Files stored on this server. Fast, seekable, writable.",
         "fields": [
             {
@@ -1077,6 +1896,7 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
     },
     "filebrowser": {
         "label": "FileBrowser / Quantum",
+        "group": "Server & storage",
         "blurb": "Bridge a FileBrowser or FileBrowser Quantum instance over its REST API.",
         "fields": [
             {"key": "base_url", "label": "Base URL", "placeholder": "https://files.example.com", "required": True},
@@ -1084,8 +1904,75 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
             {"key": "password", "label": "Password", "type": "password", "required": True},
         ],
     },
+    "webdav": {
+        "label": "WebDAV",
+        "group": "Server & storage",
+        "blurb": "Nextcloud, ownCloud or any WebDAV folder. Browse, stream, upload and organize files.",
+        "fields": [
+            {
+                "key": "base_url",
+                "label": "WebDAV URL",
+                "placeholder": "https://cloud.example.com/remote.php/dav/files/me",
+                "required": True,
+                "help": "The folder URL your WebDAV client uses. Nextcloud usually ends in /remote.php/dav/files/<user>.",
+            },
+            {"key": "username", "label": "Username", "required": True},
+            {"key": "password", "label": "Password", "type": "password", "required": True},
+        ],
+    },
+    "s3": {
+        "label": "S3-compatible",
+        "group": "Server & storage",
+        "blurb": "AWS S3, Cloudflare R2, Backblaze B2, MinIO or any S3 API. Browse, stream, upload and forward through signed URLs.",
+        "fields": [
+            {
+                "key": "endpoint",
+                "label": "Endpoint",
+                "placeholder": "https://<account>.r2.cloudflarestorage.com",
+                "help": "Optional. Leave blank for AWS. R2, B2 and MinIO need their own endpoint.",
+            },
+            {
+                "key": "region",
+                "label": "Region",
+                "placeholder": "us-east-1",
+                "help": "Use auto for R2 if your provider accepts it; otherwise match the bucket region.",
+            },
+            {"key": "bucket", "label": "Bucket", "required": True},
+            {
+                "key": "prefix",
+                "label": "Prefix",
+                "placeholder": "media",
+                "help": "Optional folder inside the bucket. Leave blank to use the bucket root.",
+            },
+            {"key": "access_key", "label": "Access key ID", "required": True},
+            {
+                "key": "secret_key",
+                "label": "Secret access key",
+                "type": "password",
+                "required": True,
+            },
+            {
+                "key": "session_token",
+                "label": "Session token",
+                "type": "password",
+                "help": "Optional. Only needed for temporary AWS credentials.",
+            },
+            {
+                "key": "path_style",
+                "label": "Addressing style",
+                "type": "select",
+                "default": "path",
+                "options": [
+                    {"value": "path", "label": "Path-style (R2, MinIO, B2)"},
+                    {"value": "virtual", "label": "Virtual-hosted (AWS S3)"},
+                ],
+                "help": "Path-style puts the bucket in the URL path. Most non-AWS providers use it.",
+            },
+        ],
+    },
     "dropbox": {
         "label": "Dropbox",
+        "group": "Cloud drives",
         "blurb": "Browse and stream with an access token, or resolve shared links.",
         "fields": [
             {
@@ -1098,6 +1985,7 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
     },
     "gdrive": {
         "label": "Google Drive",
+        "group": "Cloud drives",
         "blurb": "Browse folders and resolve public share links into direct downloads.",
         "fields": [
             {
@@ -1114,8 +2002,29 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
             },
         ],
     },
+    "onedrive": {
+        "label": "Microsoft OneDrive",
+        "group": "Cloud drives",
+        "blurb": "Browse a personal or business OneDrive with a Microsoft Graph token. Read-only.",
+        "fields": [
+            {
+                "key": "access_token",
+                "label": "Graph access token",
+                "type": "password",
+                "required": True,
+                "help": "A Microsoft Graph token with Files.Read.All. Access tokens expire after about an hour.",
+            },
+            {
+                "key": "folder_id",
+                "label": "Root folder ID",
+                "placeholder": "root",
+                "help": "Optional. The folder shown as / on this node.",
+            },
+        ],
+    },
     "terabox": {
         "label": "TeraBox",
+        "group": "Cloud drives",
         "blurb": "Resolve TeraBox share links via page API, yt-dlp, or a URL template.",
         "fields": [
             {
@@ -1134,6 +2043,7 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
     },
     "http": {
         "label": "HTTP / direct",
+        "group": "Other",
         "blurb": "Any server that exposes plain file URLs. Link-only or browsable by path.",
         "fields": [
             {
@@ -1155,8 +2065,11 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
 CONNECTOR_MAP = {
     "local": LocalConnector,
     "filebrowser": FileBrowserConnector,
+    "webdav": WebDAVConnector,
+    "s3": S3Connector,
     "dropbox": DropboxConnector,
     "gdrive": GDriveConnector,
+    "onedrive": OneDriveConnector,
     "terabox": TeraBoxConnector,
     "http": HttpConnector,
 }
@@ -1187,5 +2100,13 @@ async def test_node(node) -> dict[str, Any]:
 def node_kinds_for_ui() -> list[dict[str, Any]]:
     out = []
     for kind, meta in NODE_KINDS.items():
-        out.append({"kind": kind, "label": meta["label"], "blurb": meta["blurb"], "fields": meta["fields"]})
+        out.append(
+            {
+                "kind": kind,
+                "label": meta["label"],
+                "group": meta.get("group", "Other"),
+                "blurb": meta["blurb"],
+                "fields": meta["fields"],
+            }
+        )
     return out

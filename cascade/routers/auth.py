@@ -62,12 +62,21 @@ def _session_response(request: Request, user, days: int, redirect_to: str) -> Re
 
 
 @router.get("/login")
-async def login_page(request: Request, next: str = "/admin"):
+async def login_page(request: Request, next: str = "/admin", setup: str = ""):
     if get_auth(request):
         return RedirectResponse("/admin", status_code=303)
     if _user_count() == 0:
         return RedirectResponse("/setup", status_code=303)
-    return render(request, "login.html", next_url=safe_next(next), error=None)
+    notice = None
+    if setup == "done":
+        notice = "Setup is already complete. Sign in with an existing account."
+    return render(
+        request,
+        "login.html",
+        next_url=safe_next(next),
+        error=None,
+        notice=notice,
+    )
 
 
 @router.post("/login")
@@ -120,7 +129,7 @@ async def logout(request: Request):
 @router.get("/setup")
 async def setup_page(request: Request):
     if _user_count() > 0:
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse("/login?setup=done", status_code=303)
     return render(request, "setup.html", error=None)
 
 
@@ -133,7 +142,7 @@ async def setup_submit(
     confirm: str = Form(""),
 ):
     if _user_count() > 0:
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse("/login?setup=done", status_code=303)
     email_value = email.strip().lower()
     error = None
     if not EMAIL_RE.match(email_value):

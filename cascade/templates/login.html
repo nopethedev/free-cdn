@@ -6,6 +6,7 @@
     <span class="eyebrow">Welcome back</span>
     <h1>Sign in</h1>
     <p class="muted">Use the account created for you by an administrator.</p>
+    {% if notice %}<div class="alert">{{ notice }}</div>{% endif %}
     {% if error %}<div class="alert alert-bad">{{ error }}</div>{% endif %}
     <form method="post" action="/login" class="form-stack">
       <input type="hidden" name="next" value="{{ next_url }}">

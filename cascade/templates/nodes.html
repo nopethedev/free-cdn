@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Nodes · {{ site_name }}{% endblock %}
 {% block page_title %}Nodes{% endblock %}
-{% block page_sub %}Storage endpoints. One node is one place files can live.{% endblock %}
+{% block page_sub %}Storage endpoints. One node is one place files can live. Required fields are marked *.{% endblock %}
 {% block actions %}
 <button class="btn btn-primary" id="btn-add-node"><svg class="icon"><use href="#i-plus"/></svg>Add node</button>
 {% endblock %}
@@ -45,17 +45,26 @@
 <section class="card empty big">
   <span class="feature-icon"><svg class="icon"><use href="#i-server"/></svg></span>
   <h2>Connect your first place</h2>
-  <p>Local disk works instantly. FileBrowser, Dropbox, Drive and TeraBox take a few credentials.</p>
+  <p>Local disk only needs a name. S3, WebDAV, FileBrowser, Dropbox, Drive, OneDrive and TeraBox take a few credentials.</p>
   <button class="btn btn-primary" data-add-node>Add a node</button>
 </section>
 {% endif %}
 
 <section class="card hint-card">
+  <h2>Adding a node</h2>
+  <div class="hint-grid">
+    <div><h3>1. Pick a provider</h3><p>Local disk is the simplest. S3-compatible, WebDAV and FileBrowser can store and upload files; cloud drives are read-only sources.</p></div>
+    <div><h3>2. Name it</h3><p>The name is required and only appears in Cascade. Fill every field marked <span class="req">*</span>; fields marked optional can stay blank.</p></div>
+    <div><h3>3. Test it</h3><p>Press Add node, then Test on the card. Edit the node later to add optional settings or rotate credentials.</p></div>
+  </div>
+</section>
+
+<section class="card hint-card">
   <h2>How routing works</h2>
   <div class="hint-grid">
     <div><h3><span class="mono">/s/</span> stream</h3><p>Cascade pulls bytes from the node and writes them to the visitor, preserving Range requests so video seeks work. Nothing about the source is exposed.</p></div>
-    <div><h3><span class="mono">/f/</span> forward</h3><p>A 302 to the resolved direct URL. Best for Dropbox, Drive and TeraBox where the CDN should carry the transfer. Local links fall back to streaming.</p></div>
-    <div><h3>Replication</h3><p>Copies stream node-to-node in the background. Targets must be writable nodes: local disk or FileBrowser.</p></div>
+    <div><h3><span class="mono">/f/</span> forward</h3><p>A 302 to the resolved direct URL. Best for Dropbox, Drive, OneDrive, S3 and TeraBox where the CDN should carry the transfer. Local and WebDAV links fall back to streaming.</p></div>
+    <div><h3>Replication</h3><p>Copies stream node-to-node in the background. Targets must be writable nodes: local disk, FileBrowser, WebDAV or S3-compatible storage.</p></div>
   </div>
 </section>
 {% endblock %}

@@ -4,7 +4,28 @@ from __future__ import annotations
 def test_setup_redirects_once_admin_exists(client):
     response = client.get("/setup", follow_redirects=False)
     assert response.status_code == 303
-    assert response.headers["location"] == "/login"
+    assert response.headers["location"] == "/login?setup=done"
+
+
+def test_setup_renders_before_first_admin(client, monkeypatch):
+    from cascade.routers import auth as auth_router
+
+    monkeypatch.setattr(auth_router, "_user_count", lambda: 0)
+    response = client.get("/setup")
+    assert response.status_code == 200
+    assert "Create the admin" in response.text
+
+
+def test_login_explains_completed_setup(client):
+    response = client.get("/login?setup=done")
+    assert response.status_code == 200
+    assert "Setup is already complete" in response.text
+
+
+def test_home_does_not_offer_setup_after_initialization(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "First-time setup" not in response.text
 
 
 def test_signup_disabled_by_default(panel):

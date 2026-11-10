@@ -18,7 +18,7 @@ from ..web import render
 router = APIRouter(prefix="/admin", tags=["pages"])
 
 
-SECRET_KEYS = {"access_token", "password", "cookie", "token"}
+SECRET_KEYS = {"access_token", "password", "cookie", "token", "secret_key", "session_token"}
 
 
 def _node_config(row) -> dict:
@@ -188,7 +188,13 @@ async def links_page(request: Request, auth: Auth = Depends(require_auth)):
 async def nodes_page(request: Request, auth: Auth = Depends(require_admin)):
     node_rows = _nodes_with_caps()
     kinds = [
-        {"kind": kind, "label": meta["label"], "blurb": meta["blurb"], "fields": meta["fields"]}
+        {
+            "kind": kind,
+            "label": meta["label"],
+            "group": meta.get("group", "Other"),
+            "blurb": meta["blurb"],
+            "fields": meta["fields"],
+        }
         for kind, meta in NODE_KINDS.items()
     ]
     bootstrap = {

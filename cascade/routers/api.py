@@ -45,7 +45,7 @@ from ..utils import (
 
 router = APIRouter(prefix="/api", tags=["api"])
 
-SECRET_KEYS = {"access_token", "password", "cookie", "token"}
+SECRET_KEYS = {"access_token", "password", "cookie", "token", "secret_key", "session_token"}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -111,10 +111,18 @@ def _validate_config(kind: str, config: Any, *, require_fields: bool = True) -> 
         for field in meta["fields"]:
             if field.get("required") and not str(clean.get(field["key"]) or "").strip():
                 raise HTTPException(400, f"{field['label']} is required")
-    if kind in ("filebrowser", "http"):
+    if kind in ("filebrowser", "http", "webdav"):
         base = str(clean.get("base_url") or "")
         if base and not base.startswith(("http://", "https://")):
             raise HTTPException(400, "base URL must start with http:// or https://")
+    if kind == "s3":
+        endpoint = str(clean.get("endpoint") or "")
+        if endpoint and not endpoint.startswith(("http://", "https://")):
+            raise HTTPException(400, "S3 endpoint must start with http:// or https://")
+        prefix = str(clean.get("prefix") or "")
+        if ".." in prefix or "\\" in prefix:
+            raise HTTPException(400, "S3 prefix must be a relative path")
+        clean["prefix"] = prefix.strip("/")
     if kind == "local":
         root = str(clean.get("root") or "")
         if ".." in root or "\\" in root:
