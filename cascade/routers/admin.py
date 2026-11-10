@@ -11,6 +11,7 @@ from .. import db
 from ..deps import Auth, require_admin, require_auth
 from ..links import link_row, link_urls
 from ..nodes import NODE_KINDS, build_connector
+from ..oauth import configured_providers
 from ..serve import link_state
 from ..utils import now
 from ..web import render
@@ -18,7 +19,7 @@ from ..web import render
 router = APIRouter(prefix="/admin", tags=["pages"])
 
 
-SECRET_KEYS = {"access_token", "password", "cookie", "token", "secret_key", "session_token"}
+SECRET_KEYS = {"access_token", "refresh_token", "password", "cookie", "token", "secret_key", "session_token"}
 
 
 def _node_config(row) -> dict:
@@ -185,7 +186,13 @@ async def links_page(request: Request, auth: Auth = Depends(require_auth)):
 
 
 @router.get("/nodes")
-async def nodes_page(request: Request, auth: Auth = Depends(require_admin)):
+async def nodes_page(
+    request: Request,
+    auth: Auth = Depends(require_admin),
+    oauth: str = "",
+    message: str = "",
+    provider: str = "",
+):
     node_rows = _nodes_with_caps()
     kinds = [
         {
@@ -211,6 +218,14 @@ async def nodes_page(request: Request, auth: Auth = Depends(require_admin)):
             for item in node_rows
         ],
     }
+    notice = None
+    notice_kind = "info"
+    if oauth == "connected":
+        notice = message or f"{provider or 'Cloud drive'} connected. Press Test on its card."
+        notice_kind = "good"
+    elif oauth == "error":
+        notice = message or "Cloud-drive sign-in could not be completed."
+        notice_kind = "bad"
     return render(
         request,
         "nodes.html",
@@ -218,6 +233,9 @@ async def nodes_page(request: Request, auth: Auth = Depends(require_admin)):
         active="nodes",
         nodes=node_rows,
         kinds=kinds,
+        oauth_providers=configured_providers(),
+        oauth_notice=notice,
+        oauth_notice_kind=notice_kind,
         bootstrap=bootstrap,
     )
 

@@ -6,6 +6,7 @@
 <button class="btn btn-primary" id="btn-add-node"><svg class="icon"><use href="#i-plus"/></svg>Add node</button>
 {% endblock %}
 {% block content %}
+{% if oauth_notice %}<div class="alert alert-{{ oauth_notice_kind }}">{{ oauth_notice }}</div>{% endif %}
 {% if nodes %}
 <section class="node-grid">
   {% for item in nodes %}
@@ -51,9 +52,24 @@
 {% endif %}
 
 <section class="card hint-card">
+  <h2>Connect a cloud drive</h2>
+  <p>Sign in with the provider and Cascade creates a writable node. No cookie or pasted access token is needed; the refresh token is stored locally.</p>
+  <div class="hero-actions">
+    {% for provider in oauth_providers %}
+      {% if provider.configured %}
+        <a class="btn" href="/oauth/{{ provider.kind }}/start">Connect {{ provider.label }}</a>
+      {% else %}
+        <span class="btn btn-ghost" aria-disabled="true" title="Add this provider's OAuth client ID and secret to .env first">{{ provider.label }} not configured</span>
+      {% endif %}
+    {% endfor %}
+  </div>
+  <p class="muted tiny">Configure OAuth client credentials in .env. The callback URL is <span class="mono">/oauth/&lt;provider&gt;/callback</span> on this site's public base URL.</p>
+</section>
+
+<section class="card hint-card">
   <h2>Adding a node</h2>
   <div class="hint-grid">
-    <div><h3>1. Pick a provider</h3><p>Local disk is the simplest. S3-compatible, WebDAV and FileBrowser can store and upload files; cloud drives are read-only sources.</p></div>
+    <div><h3>1. Pick a provider</h3><p>Local disk is the simplest. S3-compatible, WebDAV, FileBrowser and connected cloud drives can store and upload files. Sign-in is the easiest way to add a cloud drive.</p></div>
     <div><h3>2. Name it</h3><p>The name is required and only appears in Cascade. Fill every field marked <span class="req">*</span>; fields marked optional can stay blank.</p></div>
     <div><h3>3. Test it</h3><p>Press Add node, then Test on the card. Edit the node later to add optional settings or rotate credentials.</p></div>
   </div>
@@ -64,7 +80,7 @@
   <div class="hint-grid">
     <div><h3><span class="mono">/s/</span> stream</h3><p>Cascade pulls bytes from the node and writes them to the visitor, preserving Range requests so video seeks work. Nothing about the source is exposed.</p></div>
     <div><h3><span class="mono">/f/</span> forward</h3><p>A 302 to the resolved direct URL. Best for Dropbox, Drive, OneDrive, S3 and TeraBox where the CDN should carry the transfer. Local and WebDAV links fall back to streaming.</p></div>
-    <div><h3>Replication</h3><p>Copies stream node-to-node in the background. Targets must be writable nodes: local disk, FileBrowser, WebDAV or S3-compatible storage.</p></div>
+    <div><h3>Replication</h3><p>Copies stream node-to-node in the background. Targets must be writable nodes: local disk, FileBrowser, WebDAV, S3-compatible storage or a connected cloud drive.</p></div>
   </div>
 </section>
 {% endblock %}

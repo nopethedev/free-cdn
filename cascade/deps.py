@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -77,7 +78,11 @@ def require_admin(request: Request) -> Auth:
 
 def request_base(request: Request) -> str:
     """Public base URL used for generated links."""
-    configured = (db.get_setting("public_base_url") or "").strip().rstrip("/")
+    configured = (
+        db.get_setting("public_base_url")
+        or os.environ.get("CASCADE_PUBLIC_BASE_URL")
+        or ""
+    ).strip().rstrip("/")
     if configured:
         return configured
     if settings.trust_proxy:

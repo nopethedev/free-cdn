@@ -23,6 +23,7 @@ from .deps import (
     same_origin,
 )
 from .routers import admin, api, auth, public
+from .routers import oauth as oauth_routes
 from .web import render
 
 logger = logging.getLogger("cascade")
@@ -134,6 +135,7 @@ async def handle_unexpected(request: Request, exc: Exception):
 
 app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
 app.include_router(auth.router)
+app.include_router(oauth_routes.router)
 app.include_router(admin.router)
 app.include_router(api.router)
 app.include_router(public.router)

@@ -45,7 +45,7 @@ from ..utils import (
 
 router = APIRouter(prefix="/api", tags=["api"])
 
-SECRET_KEYS = {"access_token", "password", "cookie", "token", "secret_key", "session_token"}
+SECRET_KEYS = {"access_token", "refresh_token", "password", "cookie", "token", "secret_key", "session_token"}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 

@@ -70,9 +70,9 @@ A node is one place files can live. Add one under **Nodes → Add node**: choose
 | FileBrowser / Quantum | yes | yes | yes | REST API. Needs a user with browse + create permissions. |
 | S3-compatible | yes | yes | yes | AWS S3, R2, B2, MinIO. Forward links use 1-hour presigned URLs. |
 | WebDAV | yes | yes | yes | Nextcloud, ownCloud or any WebDAV folder. |
-| Dropbox | with token | with token | — | Share links work without a token via the dl. rewrite. |
-| Google Drive | with token | with token | — | Public share links resolve without a token. |
-| Microsoft OneDrive | with token | with token | — | Microsoft Graph token. Read-only. |
+| Dropbox | yes | yes | yes | OAuth sign-in or a manual access token. Share links work without a token via the dl. rewrite. |
+| Google Drive | yes | yes | yes | OAuth sign-in or a manual access token. Public share links resolve without a token. |
+| Microsoft OneDrive | yes | yes | yes | OAuth sign-in or a manual Graph token. |
 | TeraBox | — | — | — | Resolver is best-effort; a cookie helps private shares. |
 | HTTP / direct | — | yes | — | Any host with plain file URLs. Optional extra headers. |
 
@@ -90,17 +90,41 @@ Cascade signs its own S3 requests, so no extra SDK is required. Browsing uses `L
 
 Point the node at the folder URL your WebDAV client uses and provide a username and password. For Nextcloud that is normally `https://cloud.example.com/remote.php/dav/files/<user>`. Cascade uses `PROPFIND` for listings and `GET`/`PUT`/`MKCOL`/`DELETE`/`MOVE` for file operations. WebDAV nodes do not have a public URL, so `/f/` falls back to `/s/`.
 
+### Cloud-drive sign-in (OAuth)
+
+The Nodes page has **Connect Dropbox**, **Connect Google Drive** and **Connect Microsoft OneDrive**. Create an OAuth app with each provider, then set the client credentials and public callback origin in `.env`:
+
+```bash
+CASCADE_PUBLIC_BASE_URL=https://cascade.example.com
+CASCADE_DROPBOX_CLIENT_ID=...
+CASCADE_DROPBOX_CLIENT_SECRET=...
+CASCADE_GOOGLE_CLIENT_ID=...
+CASCADE_GOOGLE_CLIENT_SECRET=...
+CASCADE_MICROSOFT_CLIENT_ID=...
+CASCADE_MICROSOFT_CLIENT_SECRET=...
+```
+
+Register these exact callback URLs in the provider apps:
+
+- Dropbox: `https://cascade.example.com/oauth/dropbox/callback`
+- Google Drive: `https://cascade.example.com/oauth/gdrive/callback`
+- OneDrive: `https://cascade.example.com/oauth/onedrive/callback`
+
+Clicking a Connect button signs in, creates a node, and stores the access and refresh tokens in the local SQLite database. Cascade refreshes expired access tokens automatically, so you do not paste tokens or cookies for cloud drives. Client secrets stay in the environment and are never stored in the database. If the provider does not return a refresh token, reconnect when the access token expires.
+
+Manual access-token fields remain in the Add node dialog as a fallback for provider-specific setups.
+
 ### Dropbox
 
-Copy an access token from the Dropbox App Console (scopes: `files.metadata.read`, `files.content.read`, `sharing.read` if you want shared links). With a token the node is browsable and streams through the Content API. Without one, paste `dropbox.com/s/...` or `dropbox.com/scl/fi/...` share URLs into a link and Cascade rewrites them to a direct `dl.dropboxusercontent.com` URL.
+Use **Connect Dropbox** for the normal OAuth flow. The app needs `account_info.read`, `files.metadata.read`, `files.metadata.write`, `files.content.read` and `files.content.write` scopes; Cascade requests them during sign-in. You can browse, stream, upload, create folders, rename and delete. Share links also work without a token by pasting `dropbox.com/s/...` or `dropbox.com/scl/fi/...`; Cascade rewrites them to a direct `dl.dropboxusercontent.com` URL.
 
 ### Google Drive
 
-Paste an OAuth access token (scope `drive.readonly` is enough) and optionally a root folder id. Folder entries are addressed by file id, so they survive renames. Cascade does not implement an OAuth refresh flow: access tokens expire after about an hour, so paste a fresh one for browsing. Public "anyone with the link" files work without any token through the confirm/uuid resolution path.
+Use **Connect Google Drive** for OAuth; Cascade requests the full `drive` scope so it can browse, upload and organize files in the selected account. Folder entries are addressed by file id, so they survive renames. Public "anyone with the link" files still work without a token through the confirm/uuid resolution path.
 
 ### Microsoft OneDrive
 
-Paste a Microsoft Graph access token with `Files.Read.All`, and optionally set a root folder ID. Cascade lists `/me/drive/root/children` by default and addresses folders by item ID, so renames do not break paths. Access tokens expire after about an hour and Cascade does not refresh them; paste a fresh token to reconnect. OneDrive nodes are read-only; use `/f/` for a temporary download URL or `/s/` to proxy.
+Use **Connect Microsoft OneDrive** for OAuth; Cascade requests `Files.ReadWrite.All` plus `offline_access`. It lists `/me/drive/root/children` by default and addresses folders by item ID. You can browse, stream, upload, create folders, rename and delete, and `/f/` still returns a temporary download URL when available.
 
 ### TeraBox
 
@@ -223,9 +247,9 @@ tests/               pytest suite
 ## Known limits
 
 - TeraBox resolution depends on an undocumented frontend API and can break; use the cookie/template escape hatch or yt-dlp.
-- Google Drive browsing requires a manually supplied OAuth access token (no refresh flow).
-- Dropbox, Google Drive and OneDrive are read-only; replication targets must be local disk, FileBrowser, WebDAV or S3-compatible storage.
-- Google Drive and OneDrive tokens expire after about an hour and Cascade does not implement an OAuth refresh flow. S3 credentials and WebDAV passwords do not expire on their own.
+- Cloud-drive OAuth requires you to create a provider app and set its client ID, secret and exact callback URL; Cascade cannot register those apps for you.
+- Replication targets must be writable: local disk, FileBrowser, WebDAV, S3-compatible storage, or a connected cloud drive. TeraBox and HTTP are read-only sources.
+- Cloud-drive OAuth tokens are refreshed automatically when the provider returns a refresh token. If a provider declines offline access, reconnect when its access token expires.
 - Uploads in the admin panel are parsed by Starlette before being streamed to the node, so very large uploads use temporary disk space. Keep the max upload setting sane.
 - Forwarding a local, FileBrowser or WebDAV link is impossible without a public URL, so `/f/` falls back to `/s/`. Cloud, S3 and HTTP links forward normally.
 - No multi-instance coordination: the job queue and rate limiter are in-process. One Cascade process per SQLite database is the intended deployment.

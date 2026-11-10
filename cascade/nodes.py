@@ -34,6 +34,7 @@ from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import httpx
 
+from . import oauth
 from .config import settings
 from .remote import Fetch, open_remote
 from .resolvers import Resolved
@@ -43,6 +44,7 @@ from .utils import (
     guess_mime,
     join_path,
     normalize_path,
+    parent_path,
     parse_range,
     safe_join,
     split_name,
@@ -151,6 +153,41 @@ class Connector:
 
     def capabilities_list(self) -> list[str]:
         return sorted(self.capabilities)
+
+
+class OAuthMixin:
+    """Shared OAuth token refresh for cloud-drive connectors."""
+
+    def _init_oauth(self) -> None:
+        self.token = str(self.config.get("access_token") or "").strip()
+        self.refresh_token = str(self.config.get("refresh_token") or "").strip()
+        try:
+            self.token_expires_at = int(self.config.get("token_expires_at") or 0)
+        except (TypeError, ValueError):
+            self.token_expires_at = 0
+        self.has_credentials = bool(self.token or self.refresh_token)
+
+    async def _ensure_token(self) -> str:
+        """Return a usable access token, refreshing it when possible."""
+        if self.token and (
+            not self.token_expires_at or self.token_expires_at > time.time() + 60
+        ):
+            return self.token
+        if self.refresh_token:
+            try:
+                payload = await oauth.refresh_access_token(self.kind, self.refresh_token)
+            except Exception as exc:
+                raise NodeError(
+                    f"{self.name or self.kind} sign-in expired and could not be refreshed: {exc}"
+                ) from exc
+            self.token = str(payload.get("access_token") or "").strip()
+            if not self.token:
+                raise NodeError(f"{self.name or self.kind} did not return a refreshed access token")
+            self.token_expires_at = oauth.token_expiry(payload)
+            return self.token
+        if self.token:
+            return self.token
+        raise NodeError(f"{self.name or self.kind} needs a cloud-drive sign-in or access token")
 
 
 # ---------------------------------------------------------------------------
@@ -739,15 +776,17 @@ class _MultipartStream(httpx.AsyncByteStream):
 # ---------------------------------------------------------------------------
 
 
-class DropboxConnector(Connector):
+class DropboxConnector(OAuthMixin, Connector):
     kind = "dropbox"
     API = "https://api.dropboxapi.com/2"
     CONTENT = "https://content.dropboxapi.com/2"
 
     def __init__(self, node) -> None:
         super().__init__(node)
-        self.token = str(self.config.get("access_token") or "").strip()
-        self.capabilities = {"direct"} | ({"list", "read"} if self.token else set())
+        self._init_oauth()
+        self.capabilities = {"direct"} | (
+            {"list", "read", "write"} if self.has_credentials else set()
+        )
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {"Authorization": f"Bearer {self.token}"}
@@ -760,9 +799,10 @@ class DropboxConnector(Connector):
         return "" if path == "/" else path
 
     async def ping(self) -> tuple[bool, str]:
-        if not self.token:
+        if not self.has_credentials:
             return True, "link-only mode (add an access token to browse)"
         try:
+            await self._ensure_token()
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(
                     f"{self.API}/users/get_current_account", headers=self._headers()
@@ -778,6 +818,7 @@ class DropboxConnector(Connector):
         return True, f"connected to {name}"
 
     async def list(self, path: str) -> list[FileItem]:
+        await self._ensure_token()
         if not self.token:
             raise Unsupported("Dropbox nodes need an access token to be browsed")
         api_path = self._api_path(path)
@@ -831,6 +872,7 @@ class DropboxConnector(Connector):
         return items
 
     async def fetch(self, path: str, range_header: str | None = None) -> Fetch:
+        await self._ensure_token()
         if not self.token:
             raise Unsupported("Dropbox nodes need an access token to stream files")
         api_path = self._api_path(path)
@@ -849,10 +891,189 @@ class DropboxConnector(Connector):
         except Exception as exc:
             raise NodeError(f"Dropbox download failed: {exc}") from exc
 
-    async def direct(self, path: str) -> Resolved | None:
+    SIMPLE_UPLOAD_LIMIT = 150 * 1024 * 1024
+    SESSION_CHUNK = 8 * 1024 * 1024
+
+    def _require_token(self) -> None:
         if not self.token:
+            raise NodeError("Dropbox access token is required")
+
+    def _content_headers(self, arg: dict[str, Any]) -> dict[str, str]:
+        return self._headers(
+            {
+                "Content-Type": "application/octet-stream",
+                "Dropbox-API-Arg": json.dumps(arg),
+            }
+        )
+
+    def _check(self, response: httpx.Response, action: str) -> None:
+        if response.status_code >= 400:
+            raise NodeError(
+                f"Dropbox {action} failed: "
+                f"{_http_error_message(response, f'HTTP {response.status_code}')}"
+            )
+
+    async def _append_session(
+        self, client: httpx.AsyncClient, session_id: str, offset: int, chunk: bytes
+    ) -> None:
+        if not chunk:
+            return
+        response = await client.post(
+            f"{self.CONTENT}/files/upload_session/append_v2",
+            headers=self._content_headers(
+                {"cursor": {"session_id": session_id, "offset": offset}}
+            ),
+            content=chunk,
+        )
+        self._check(response, "upload")
+
+    async def _upload_session(
+        self,
+        client: httpx.AsyncClient,
+        api_path: str,
+        body: AsyncIterator[bytes],
+    ) -> None:
+        response = await client.post(
+            f"{self.CONTENT}/files/upload_session/start",
+            headers=self._content_headers({"close": False}),
+            content=b"",
+        )
+        self._check(response, "upload session")
+        try:
+            session_id = str(response.json().get("session_id") or "")
+        except ValueError as exc:
+            raise NodeError("Dropbox returned an invalid upload session") from exc
+        if not session_id:
+            raise NodeError("Dropbox did not return an upload session")
+
+        offset = 0
+        pending = bytearray()
+        async for part in body:
+            pending.extend(part)
+            while len(pending) > self.SESSION_CHUNK:
+                chunk = bytes(pending[: self.SESSION_CHUNK])
+                del pending[: self.SESSION_CHUNK]
+                await self._append_session(client, session_id, offset, chunk)
+                offset += len(chunk)
+        response = await client.post(
+            f"{self.CONTENT}/files/upload_session/finish",
+            headers=self._content_headers(
+                {
+                    "cursor": {"session_id": session_id, "offset": offset},
+                    "commit": {
+                        "path": api_path,
+                        "mode": "add",
+                        "autorename": False,
+                        "mute": True,
+                    },
+                }
+            ),
+            content=bytes(pending),
+        )
+        self._check(response, "upload")
+
+    async def upload(
+        self,
+        path: str,
+        body: AsyncIterator[bytes],
+        size: int | None = None,
+        mime: str | None = None,
+    ) -> int:
+        await self._ensure_token()
+        api_path = self._api_path(path)
+        if not api_path:
+            raise NodeError("choose a file path")
+        total = 0
+
+        async def counted() -> AsyncIterator[bytes]:
+            nonlocal total
+            async for chunk in body:
+                if chunk:
+                    total += len(chunk)
+                    yield chunk
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600, connect=30)) as client:
+                if size is not None and size <= self.SIMPLE_UPLOAD_LIMIT:
+                    response = await client.post(
+                        f"{self.CONTENT}/files/upload",
+                        headers=self._content_headers(
+                            {
+                                "path": api_path,
+                                "mode": "add",
+                                "autorename": False,
+                                "mute": True,
+                            }
+                        ),
+                        content=_BodyStream(counted(), size),
+                    )
+                    self._check(response, "upload")
+                else:
+                    await self._upload_session(client, api_path, counted())
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Dropbox upload failed: {exc}") from exc
+        return total
+
+    async def mkdir(self, path: str) -> None:
+        await self._ensure_token()
+        api_path = self._api_path(path)
+        if not api_path:
+            raise NodeError("choose a folder path")
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.API}/files/create_folder_v2",
+                    headers=self._headers({"Content-Type": "application/json"}),
+                    json={"path": api_path, "autorename": False},
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Dropbox mkdir failed: {exc}") from exc
+        self._check(response, "mkdir")
+
+    async def delete(self, path: str) -> None:
+        await self._ensure_token()
+        api_path = self._api_path(path)
+        if not api_path:
+            raise NodeError("refusing to delete the node root")
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.API}/files/delete_v2",
+                    headers=self._headers({"Content-Type": "application/json"}),
+                    json={"path": api_path},
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Dropbox delete failed: {exc}") from exc
+        self._check(response, "delete")
+
+    async def rename(self, path: str, new_path: str) -> None:
+        await self._ensure_token()
+        api_path = self._api_path(path)
+        new_api_path = self._api_path(new_path)
+        if not api_path or not new_api_path:
+            raise NodeError("choose a file or folder to rename")
+        if api_path == new_api_path:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{self.API}/files/move_v2",
+                    headers=self._headers({"Content-Type": "application/json"}),
+                    json={
+                        "from_path": api_path,
+                        "to_path": new_api_path,
+                        "autorename": False,
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Dropbox rename failed: {exc}") from exc
+        self._check(response, "rename")
+
+    async def direct(self, path: str) -> Resolved | None:
+        if not self.has_credentials:
             return None
         try:
+            await self._ensure_token()
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(
                     f"{self.API}/files/get_temporary_link",
@@ -874,22 +1095,25 @@ class DropboxConnector(Connector):
 # ---------------------------------------------------------------------------
 
 
-class GDriveConnector(Connector):
+class GDriveConnector(OAuthMixin, Connector):
     kind = "gdrive"
     API = "https://www.googleapis.com/drive/v3/files"
 
     def __init__(self, node) -> None:
         super().__init__(node)
-        self.token = str(self.config.get("access_token") or "").strip()
-        self.capabilities = {"direct"} | ({"list", "read"} if self.token else set())
+        self._init_oauth()
+        self.capabilities = {"direct"} | (
+            {"list", "read", "write"} if self.has_credentials else set()
+        )
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
     async def ping(self) -> tuple[bool, str]:
-        if not self.token:
+        if not self.has_credentials:
             return True, "link-only mode (add an access token to browse)"
         try:
+            await self._ensure_token()
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.get(
                     "https://www.googleapis.com/drive/v3/about?fields=user",
@@ -906,6 +1130,7 @@ class GDriveConnector(Connector):
         return True, f"connected as {email}"
 
     async def list(self, path: str) -> list[FileItem]:
+        await self._ensure_token()
         if not self.token:
             raise Unsupported("Google Drive nodes need an access token to be browsed")
         path = normalize_path(path)
@@ -966,6 +1191,7 @@ class GDriveConnector(Connector):
         return items
 
     async def fetch(self, path: str, range_header: str | None = None) -> Fetch:
+        await self._ensure_token()
         if not self.token:
             raise Unsupported("Google Drive nodes need an access token to stream files")
         file_id = normalize_path(path).strip("/").rsplit("/", 1)[-1]
@@ -983,7 +1209,151 @@ class GDriveConnector(Connector):
         except Exception as exc:
             raise NodeError(f"Google Drive download failed: {exc}") from exc
 
+    UPLOAD_API = "https://www.googleapis.com/upload/drive/v3/files"
+
+    def _require_token(self) -> None:
+        if not self.token:
+            raise NodeError("Google Drive access token is required")
+
+    def _folder_id(self, path: str) -> str:
+        normalized = normalize_path(path)
+        if normalized == "/":
+            return str(self.config.get("folder_id") or "root")
+        return normalized.strip("/").rsplit("/", 1)[-1]
+
+    def _file_id(self, path: str) -> str:
+        normalized = normalize_path(path)
+        if normalized == "/":
+            raise NodeError("choose a file or folder")
+        return normalized.strip("/").rsplit("/", 1)[-1]
+
+    def _check(self, response: httpx.Response, action: str) -> None:
+        if response.status_code >= 300:
+            raise NodeError(
+                f"Google Drive {action} failed: "
+                f"{_http_error_message(response, f'HTTP {response.status_code}')}"
+            )
+
+    async def upload(
+        self,
+        path: str,
+        body: AsyncIterator[bytes],
+        size: int | None = None,
+        mime: str | None = None,
+    ) -> int:
+        await self._ensure_token()
+        name = base_name(path)
+        if not name:
+            raise NodeError("choose a file path")
+        parent = self._folder_id(parent_path(path))
+        total = 0
+
+        async def counted() -> AsyncIterator[bytes]:
+            nonlocal total
+            async for chunk in body:
+                if chunk:
+                    total += len(chunk)
+                    yield chunk
+
+        content_type = mime or guess_mime(name)
+        metadata = {"name": name, "parents": [parent], "mimeType": content_type}
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Type": content_type,
+        }
+        if size is not None:
+            headers["X-Upload-Content-Length"] = str(size)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600, connect=30)) as client:
+                response = await client.post(
+                    self.UPLOAD_API,
+                    params={
+                        "uploadType": "resumable",
+                        "supportsAllDrives": "true",
+                        "fields": "id,name,size",
+                    },
+                    headers=headers,
+                    json=metadata,
+                )
+                self._check(response, "upload")
+                upload_url = response.headers.get("location")
+                if not upload_url:
+                    raise NodeError("Google Drive did not return an upload URL")
+                put_headers = {"Content-Type": content_type}
+                if size is not None:
+                    put_headers["Content-Length"] = str(size)
+                response = await client.put(
+                    upload_url,
+                    headers=put_headers,
+                    content=_BodyStream(counted(), size),
+                )
+                self._check(response, "upload")
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Google Drive upload failed: {exc}") from exc
+        return total
+
+    async def mkdir(self, path: str) -> None:
+        await self._ensure_token()
+        name = base_name(path)
+        if not name:
+            raise NodeError("choose a folder path")
+        parent = self._folder_id(parent_path(path))
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    self.API,
+                    params={"supportsAllDrives": "true", "fields": "id,name"},
+                    headers={**self._headers(), "Content-Type": "application/json"},
+                    json={
+                        "name": name,
+                        "mimeType": "application/vnd.google-apps.folder",
+                        "parents": [parent],
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Google Drive mkdir failed: {exc}") from exc
+        self._check(response, "mkdir")
+
+    async def delete(self, path: str) -> None:
+        await self._ensure_token()
+        file_id = self._file_id(path)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.delete(
+                    f"{self.API}/{quote(file_id, safe='')}",
+                    params={"supportsAllDrives": "true"},
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Google Drive delete failed: {exc}") from exc
+        self._check(response, "delete")
+
+    async def rename(self, path: str, new_path: str) -> None:
+        await self._ensure_token()
+        file_id = self._file_id(path)
+        new_name = base_name(new_path)
+        if not new_name:
+            raise NodeError("choose a new name")
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.patch(
+                    f"{self.API}/{quote(file_id, safe='')}",
+                    params={"supportsAllDrives": "true", "fields": "id,name"},
+                    headers={**self._headers(), "Content-Type": "application/json"},
+                    json={"name": new_name},
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"Google Drive rename failed: {exc}") from exc
+        self._check(response, "rename")
+
     async def direct(self, path: str) -> Resolved | None:
+        if not self.has_credentials:
+            return None
+        try:
+            await self._ensure_token()
+        except NodeError:
+            return None
         file_id = normalize_path(path).strip("/").rsplit("/", 1)[-1]
         if not file_id:
             return None
@@ -1675,14 +2045,19 @@ class WebDAVConnector(Connector):
 # ---------------------------------------------------------------------------
 
 
-class OneDriveConnector(Connector):
+class OneDriveConnector(OAuthMixin, Connector):
     kind = "onedrive"
-    capabilities = {"list", "read", "direct"}
+    capabilities = {"direct"}
     API = "https://graph.microsoft.com/v1.0"
+    SIMPLE_UPLOAD_LIMIT = 250 * 1024 * 1024
+    UPLOAD_CHUNK = 10 * 1024 * 1024
 
     def __init__(self, node) -> None:
         super().__init__(node)
-        self.token = str(self.config.get("access_token") or "").strip()
+        self._init_oauth()
+        self.capabilities = {"direct"} | (
+            {"list", "read", "write"} if self.has_credentials else set()
+        )
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
@@ -1693,15 +2068,97 @@ class OneDriveConnector(Connector):
             return str(self.config.get("folder_id") or "root")
         return normalized.strip("/").rsplit("/", 1)[-1]
 
+    def _file_id(self, path: str) -> str:
+        normalized = normalize_path(path)
+        if normalized == "/":
+            raise NodeError("choose a file or folder")
+        return normalized.strip("/").rsplit("/", 1)[-1]
+
     def _children_url(self, folder_id: str) -> str:
         if folder_id == "root":
             return f"{self.API}/me/drive/root/children"
         return f"{self.API}/me/drive/items/{quote(folder_id, safe='')}/children"
 
-    async def ping(self) -> tuple[bool, str]:
+    def _item_url(self, item_id: str) -> str:
+        return f"{self.API}/me/drive/items/{quote(item_id, safe='')}"
+
+    def _path_url(self, path: str) -> str:
+        parent_id = self._id(parent_path(path))
+        name = quote(base_name(path), safe="")
+        if parent_id == "root":
+            return f"{self.API}/me/drive/root:/{name}:/"
+        return f"{self.API}/me/drive/items/{quote(parent_id, safe='')}:/{name}:/"
+
+    def _content_url(self, path: str) -> str:
+        return self._path_url(path) + "content"
+
+    def _upload_session_url(self, path: str) -> str:
+        return self._path_url(path) + "createUploadSession"
+
+    def _require_token(self) -> None:
         if not self.token:
+            raise NodeError("OneDrive access token is required")
+
+    def _check(self, response: httpx.Response, action: str) -> None:
+        if response.status_code >= 300:
+            raise NodeError(
+                f"OneDrive {action} failed: "
+                f"{_http_error_message(response, f'HTTP {response.status_code}')}"
+            )
+
+    async def _put_chunk(
+        self,
+        client: httpx.AsyncClient,
+        upload_url: str,
+        offset: int,
+        chunk: bytes,
+        total: int,
+    ) -> None:
+        response = await client.put(
+            upload_url,
+            headers={
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {offset}-{offset + len(chunk) - 1}/{total}",
+            },
+            content=chunk,
+        )
+        self._check(response, "upload")
+
+    async def _upload_chunks(
+        self,
+        client: httpx.AsyncClient,
+        upload_url: str,
+        body: AsyncIterator[bytes],
+        total: int,
+    ) -> None:
+        offset = 0
+        pending = bytearray()
+        async for part in body:
+            pending.extend(part)
+            while (
+                len(pending) >= self.UPLOAD_CHUNK
+                and offset + self.UPLOAD_CHUNK <= total
+            ):
+                chunk = bytes(pending[: self.UPLOAD_CHUNK])
+                del pending[: self.UPLOAD_CHUNK]
+                await self._put_chunk(client, upload_url, offset, chunk, total)
+                offset += len(chunk)
+        if offset < total:
+            chunk = bytes(pending)
+            if len(chunk) != total - offset:
+                raise NodeError("OneDrive upload body did not match the expected size")
+            await self._put_chunk(client, upload_url, offset, chunk, total)
+            offset += len(chunk)
+        elif pending:
+            raise NodeError("OneDrive upload body exceeded the expected size")
+        if offset != total:
+            raise NodeError("OneDrive upload did not send the expected number of bytes")
+
+    async def ping(self) -> tuple[bool, str]:
+        if not self.has_credentials:
             return False, "OneDrive access token is required"
         try:
+            await self._ensure_token()
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.get(
                     f"{self.API}/me/drive", params={"$select": "id,driveType,owner"}, headers=self._headers()
@@ -1713,6 +2170,7 @@ class OneDriveConnector(Connector):
         return True, "connected to OneDrive"
 
     async def list(self, path: str) -> list[FileItem]:
+        await self._ensure_token()
         if not self.token:
             raise NodeError("OneDrive access token is required")
         folder_id = self._id(path)
@@ -1764,6 +2222,7 @@ class OneDriveConnector(Connector):
         return items
 
     async def fetch(self, path: str, range_header: str | None = None) -> Fetch:
+        await self._ensure_token()
         if not self.token:
             raise NodeError("OneDrive access token is required")
         item_id = self._id(path)
@@ -1781,13 +2240,123 @@ class OneDriveConnector(Connector):
         except Exception as exc:
             raise NodeError(f"OneDrive download failed: {exc}") from exc
 
+    async def upload(
+        self,
+        path: str,
+        body: AsyncIterator[bytes],
+        size: int | None = None,
+        mime: str | None = None,
+    ) -> int:
+        await self._ensure_token()
+        name = base_name(path)
+        if not name:
+            raise NodeError("choose a file path")
+        if size is None:
+            raise NodeError("OneDrive uploads need a known file size")
+        total = 0
+
+        async def counted() -> AsyncIterator[bytes]:
+            nonlocal total
+            async for chunk in body:
+                if chunk:
+                    total += len(chunk)
+                    yield chunk
+
+        content_type = mime or guess_mime(name)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3600, connect=30)) as client:
+                if size <= self.SIMPLE_UPLOAD_LIMIT:
+                    response = await client.put(
+                        self._content_url(path),
+                        headers={
+                            **self._headers(),
+                            "Content-Type": content_type,
+                            "Content-Length": str(size),
+                        },
+                        content=_BodyStream(counted(), size),
+                    )
+                    self._check(response, "upload")
+                else:
+                    response = await client.post(
+                        self._upload_session_url(path),
+                        headers={**self._headers(), "Content-Type": "application/json"},
+                        json={
+                            "item": {
+                                "@microsoft.graph.conflictBehavior": "replace",
+                                "name": name,
+                            }
+                        },
+                    )
+                    self._check(response, "upload session")
+                    try:
+                        upload_url = str(response.json().get("uploadUrl") or "")
+                    except ValueError as exc:
+                        raise NodeError("OneDrive returned an invalid upload session") from exc
+                    if not upload_url:
+                        raise NodeError("OneDrive did not return an upload URL")
+                    await self._upload_chunks(client, upload_url, counted(), size)
+        except httpx.HTTPError as exc:
+            raise NodeError(f"OneDrive upload failed: {exc}") from exc
+        return total
+
+    async def mkdir(self, path: str) -> None:
+        await self._ensure_token()
+        name = base_name(path)
+        if not name:
+            raise NodeError("choose a folder path")
+        parent_id = self._id(parent_path(path))
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    self._children_url(parent_id),
+                    headers={**self._headers(), "Content-Type": "application/json"},
+                    json={
+                        "name": name,
+                        "folder": {},
+                        "@microsoft.graph.conflictBehavior": "fail",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"OneDrive mkdir failed: {exc}") from exc
+        self._check(response, "mkdir")
+
+    async def delete(self, path: str) -> None:
+        await self._ensure_token()
+        item_id = self._file_id(path)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.delete(
+                    self._item_url(item_id), headers=self._headers()
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"OneDrive delete failed: {exc}") from exc
+        self._check(response, "delete")
+
+    async def rename(self, path: str, new_path: str) -> None:
+        await self._ensure_token()
+        item_id = self._file_id(path)
+        new_name = base_name(new_path)
+        if not new_name:
+            raise NodeError("choose a new name")
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.patch(
+                    self._item_url(item_id),
+                    headers={**self._headers(), "Content-Type": "application/json"},
+                    json={"name": new_name},
+                )
+        except httpx.HTTPError as exc:
+            raise NodeError(f"OneDrive rename failed: {exc}") from exc
+        self._check(response, "rename")
+
     async def direct(self, path: str) -> Resolved | None:
-        if not self.token:
+        if not self.has_credentials:
             return None
         item_id = self._id(path)
         if item_id == "root":
             return None
         try:
+            await self._ensure_token()
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.get(
                     f"{self.API}/me/drive/items/{quote(item_id, safe='')}",
@@ -1973,26 +2542,26 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
     "dropbox": {
         "label": "Dropbox",
         "group": "Cloud drives",
-        "blurb": "Browse and stream with an access token, or resolve shared links.",
+        "blurb": "Sign in to browse, stream and upload, or paste an access token as a manual fallback.",
         "fields": [
             {
                 "key": "access_token",
                 "label": "Access token",
                 "type": "password",
-                "help": "Optional. A Dropbox API token unlocks browsing and temporary links.",
+                "help": "Optional fallback. Use Connect Dropbox on the Nodes page for OAuth sign-in and automatic token refresh.",
             }
         ],
     },
     "gdrive": {
         "label": "Google Drive",
         "group": "Cloud drives",
-        "blurb": "Browse folders and resolve public share links into direct downloads.",
+        "blurb": "Sign in to browse, stream and upload Drive files, or resolve public share links.",
         "fields": [
             {
                 "key": "access_token",
                 "label": "OAuth access token",
                 "type": "password",
-                "help": "Optional. Needed only to browse or stream private files.",
+                "help": "Optional fallback. Use Connect Google Drive on the Nodes page for OAuth sign-in and automatic token refresh.",
             },
             {
                 "key": "folder_id",
@@ -2005,14 +2574,14 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
     "onedrive": {
         "label": "Microsoft OneDrive",
         "group": "Cloud drives",
-        "blurb": "Browse a personal or business OneDrive with a Microsoft Graph token. Read-only.",
+        "blurb": "Sign in with Microsoft to browse, stream and upload OneDrive files.",
         "fields": [
             {
                 "key": "access_token",
                 "label": "Graph access token",
                 "type": "password",
                 "required": True,
-                "help": "A Microsoft Graph token with Files.Read.All. Access tokens expire after about an hour.",
+                "help": "Optional fallback. Use Connect Microsoft OneDrive on the Nodes page for OAuth sign-in and automatic token refresh.",
             },
             {
                 "key": "folder_id",

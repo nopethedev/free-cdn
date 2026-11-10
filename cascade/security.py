@@ -66,6 +66,7 @@ RESERVED_IDS = {
     "f",
     "assets",
     "public",
+    "oauth",
 }
 
 

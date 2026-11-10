@@ -810,7 +810,7 @@
 
   /* Nodes ------------------------------------------------------------------ */
 
-  const SECRET_KEYS = ["access_token", "password", "cookie", "token", "secret_key", "session_token"];
+  const SECRET_KEYS = ["access_token", "refresh_token", "password", "cookie", "token", "secret_key", "session_token"];
 
   function nodeKindMeta(kind) {
     return (C.kinds || []).find((item) => item.kind === kind) || { fields: [] };
