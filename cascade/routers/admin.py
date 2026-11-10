@@ -7,7 +7,7 @@ import json
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
-from .. import db
+from .. import browser_login, db
 from ..config import settings
 from ..deps import Auth, require_admin, require_auth
 from ..links import link_row, link_urls
@@ -195,6 +195,9 @@ async def nodes_page(
     provider: str = "",
 ):
     node_rows = _nodes_with_caps()
+    browser_login_ready = bool(
+        settings.browser_login_enabled and browser_login.playwright_available()
+    )
     kinds = [
         {
             "kind": kind,
@@ -225,7 +228,7 @@ async def nodes_page(
             for provider in configured_providers()
         },
         "browserLogin": {
-            "enabled": bool(settings.browser_login_enabled),
+            "enabled": browser_login_ready,
             "timeout": int(settings.browser_login_timeout),
         },
     }
@@ -247,7 +250,7 @@ async def nodes_page(
         oauth_providers=configured_providers(),
         oauth_notice=notice,
         oauth_notice_kind=notice_kind,
-        browser_login_enabled=settings.browser_login_enabled,
+        browser_login_ready=browser_login_ready,
         browser_login_minutes=max(1, int(settings.browser_login_timeout) // 60),
         bootstrap=bootstrap,
     )

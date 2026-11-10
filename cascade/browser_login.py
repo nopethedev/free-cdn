@@ -244,8 +244,8 @@ def start(
         )
     if not playwright_available():
         raise BrowserLoginError(
-            "Browser sign-in needs Playwright. Run "
-            "'pip install -r requirements.txt' and 'python -m playwright install chromium'."
+            "Browser sign-in needs the optional helper. Run "
+            "'pip install -r requirements-browser.txt' and 'python -m playwright install chromium'."
         )
     with _lock:
         _cleanup_locked()
@@ -452,8 +452,8 @@ def _run_browser_login(request: dict[str, Any]) -> dict[str, Any]:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise BrowserLoginError(
-            "Browser sign-in needs Playwright. Run 'pip install -r requirements.txt' "
-            "and 'python -m playwright install chromium'."
+            "Browser sign-in needs the optional helper. Run "
+            "'pip install -r requirements-browser.txt' and 'python -m playwright install chromium'."
         ) from exc
 
     with sync_playwright() as playwright:

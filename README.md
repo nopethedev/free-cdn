@@ -25,7 +25,6 @@ admin   ── /admin    ──► nodes · files · links · replication · peo
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-python -m playwright install chromium   # for TeraBox browser sign-in
 
 cp .env.example .env          # optional; Cascade reads .env automatically
 # leave the admin values blank to create the first admin through /setup
@@ -59,7 +58,7 @@ docker run -d -p 8000:8000 -v cascade-data:/data \
 
 The image runs as UID 10001. Compose uses a named volume so permissions just work; if you prefer a bind mount, `chown -R 10001:10001 ./data` first.
 
-Browser sign-in for TeraBox needs a real desktop session and a local Chromium install, so Compose disables it with `CASCADE_BROWSER_LOGIN=0`. The OAuth cloud drives and all other node types work normally in Docker. Run Cascade with normal Python on a desktop if you want the TeraBox browser flow.
+The optional TeraBox browser helper is not installed in the base image, and it needs a real desktop session and a local Chromium install. Compose therefore leaves it off with `CASCADE_BROWSER_LOGIN=0`. The OAuth cloud drives, manual TeraBox cookies and all other node types work normally in Docker. Use the optional helper with normal Python on a desktop if you want the browser flow.
 
 SQLite lives in `data/cascade.db`, local files in `data/files/`, and the signing key in `data/secret.key` (unless `CASCADE_SECRET` is set). Back up the `data/` directory.
 
@@ -129,27 +128,29 @@ Use **Connect Google Drive** for OAuth; Cascade requests the full `drive` scope 
 
 Use **Connect Microsoft OneDrive** for OAuth; Cascade requests `Files.ReadWrite.All` plus `offline_access`. It lists `/me/drive/root/children` by default and addresses folders by item ID. You can browse, stream, upload, create folders, rename and delete, and `/f/` still returns a temporary download URL when available.
 
-### Browser sign-in for TeraBox
+### Optional browser sign-in for TeraBox
 
-Dropbox, Google Drive and OneDrive use browser OAuth because their APIs require Bearer tokens. TeraBox has no equivalent OAuth API for private shares, so Cascade uses a short-lived local Chromium session to capture the session cookie instead. **A normal web page cannot read another origin's HttpOnly cookies**, so this runs on the machine hosting Cascade, not inside the visitor's browser.
+Dropbox, Google Drive and OneDrive use browser OAuth because their APIs require Bearer tokens. TeraBox has no equivalent OAuth API for private shares, so Cascade can optionally use a short-lived local Chromium session to capture the session cookie. **A normal web page cannot read another origin's HttpOnly cookies**, so this runs on the machine hosting Cascade, not inside the visitor's browser.
 
-Add TeraBox from **Nodes → Add node**, then press **Sign in with browser**. Cascade opens Chromium, waits up to 10 minutes while you sign in normally, saves only the TeraBox session cookies (`ndus` / `BDUSS`) into the node config, and closes the window. The cookie never comes back to the admin page, is not logged, and the temporary browser profile is discarded.
+**The base `requirements.txt` does not install Playwright or Chromium. Manual cookies always work without it.** Add a TeraBox node and paste the `ndus=...` cookie from a signed-in browser into the **Browser cookie** field. That is the default path and needs no extra downloads.
 
-This works with a normal Python install:
+To enable the optional browser capture instead:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-browser.txt
 python -m playwright install chromium
 python -m cascade
 ```
 
-On Linux, if Chromium reports missing shared libraries, install its system dependencies with `python -m playwright install --with-deps chromium` (this may ask for sudo). The browser flow is part of the ordinary Python app, not a Docker-only feature.
+Then add TeraBox from **Nodes → Add node** and press **Sign in with browser**. Cascade opens Chromium, waits up to 10 minutes while you sign in normally, saves only the TeraBox session cookies (`ndus` / `BDUSS`) into the node config, and closes the window. The cookie never comes back to the admin page, is not logged, and the temporary browser profile is discarded. When the helper is not installed, the browser button is hidden and the manual cookie field remains.
 
-It needs a desktop session on the machine running Cascade. On a headless server, use the manual cookie field or run Cascade on a desktop and expose it through a tunnel. Set `CASCADE_BROWSER_LOGIN=0` to hide the browser option, or change `CASCADE_BROWSER_LOGIN_TIMEOUT` (seconds, default `600`). The Add-node dialog also has a **Sign in with browser** button for each OAuth cloud drive; those buttons open the provider's OAuth page in a new window.
+On Linux, if Chromium reports missing shared libraries, install its system dependencies with `python -m playwright install --with-deps chromium` (this may ask for sudo). The browser flow is an optional add-on to the ordinary Python app, not a Docker-only feature.
+
+It needs a desktop session on the machine running Cascade. On a headless server, use the manual cookie field or run Cascade on a desktop and expose it through a tunnel. Set `CASCADE_BROWSER_LOGIN=0` to hide the optional browser option, or change `CASCADE_BROWSER_LOGIN_TIMEOUT` (seconds, default `600`). The Add-node dialog also has a **Sign in with browser** button for each OAuth cloud drive; those buttons open the provider's OAuth page in a new window.
 
 ### TeraBox
 
-Use a share URL (`terabox.com/s/...`). Cascade first tries a page scrape (`share/list` with the share ids and cookie), then `yt-dlp` if it is installed, then a configurable direct URL template. Use **Sign in with browser** for private shares; pasting the browser cookie (at least `ndus=...`) remains available as a fallback. This resolver is inherently fragile because TeraBox changes its frontend; the template escape hatch lets you supply your own CDN pattern:
+Use a share URL (`terabox.com/s/...`). Cascade first tries a page scrape (`share/list` with the share ids and cookie), then `yt-dlp` if it is installed, then a configurable direct URL template. Paste the browser cookie (at least `ndus=...`) into the node for private shares; the optional browser capture above can fill that field for you. This resolver is inherently fragile because TeraBox changes its frontend; the template escape hatch lets you supply your own CDN pattern:
 
 ```
 https://d.terabox.com/file/{id}
@@ -221,7 +222,7 @@ Environment variables:
 | `CASCADE_HOST` / `CASCADE_PORT` | `0.0.0.0` / `8000` | Listener used by `python -m cascade`. |
 | `CASCADE_TRUST_PROXY` | `0` | Honour `X-Forwarded-For` and uvicorn proxy headers. |
 | `CASCADE_COOKIE_SECURE` | `0` | Mark session cookies `Secure` (enable on HTTPS). |
-| `CASCADE_BROWSER_LOGIN` | `1` | Show and enable the local Chromium cookie sign-in for TeraBox. Compose defaults it to `0`. |
+| `CASCADE_BROWSER_LOGIN` | `1` | Enable the optional local Chromium cookie sign-in for TeraBox when the browser helper is installed. Compose defaults it to `0`. |
 | `CASCADE_BROWSER_LOGIN_TIMEOUT` | `600` | Seconds before the browser sign-in window closes (120–1800). |
 | `CASCADE_YTDLP` | `yt-dlp` | Default binary for the resolver bridge. |
 

@@ -54,11 +54,28 @@ def test_browser_login_saves_a_cookie_without_returning_or_auditing_it(clean_sta
     assert db.fetchone("SELECT COUNT(*) AS n FROM nodes")["n"] == 1
 
 
-def test_nodes_page_exposes_browser_sign_in(panel):
+def test_nodes_page_exposes_browser_sign_in_when_optional_helper_is_available(panel, monkeypatch):
+    monkeypatch.setattr(browser_login, "playwright_available", lambda: True)
     response = panel.get("/admin/nodes")
     assert response.status_code == 200
     assert 'data-add-node-kind="terabox"' in response.text
     assert "Sign in to TeraBox" in response.text
+
+
+def test_nodes_page_keeps_manual_cookie_when_optional_helper_is_missing(panel, monkeypatch):
+    monkeypatch.setattr(browser_login, "playwright_available", lambda: False)
+    response = panel.get("/admin/nodes")
+    assert response.status_code == 200
+    assert 'data-add-node-kind="terabox"' not in response.text
+    assert "Browser sign-in is optional and unavailable here" in response.text
+    assert "Browser cookie" in response.text
+
+
+def test_browser_login_start_explains_the_optional_install(panel, monkeypatch):
+    monkeypatch.setattr(browser_login, "playwright_available", lambda: False)
+    response = panel.post("/api/nodes/browser/start", json={"kind": "terabox"})
+    assert response.status_code == 409
+    assert "requirements-browser.txt" in response.text
 
 
 def test_browser_login_start_does_not_return_the_cookie(panel, monkeypatch):

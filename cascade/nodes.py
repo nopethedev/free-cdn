@@ -2611,7 +2611,8 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
                 "label": "Browser cookie",
                 "type": "password",
                 "help": (
-                    "Optional. Use Sign in with browser in Add node; paste ndus=... only as a fallback."
+                    "Optional. Paste ndus=... from a signed-in browser; this needs no Chromium. "
+                    "Browser sign-in appears only when the optional Playwright helper is installed."
                 ),
             },
             {
