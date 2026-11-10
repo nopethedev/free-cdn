@@ -1,0 +1,54 @@
+{% extends "layout_public.html" %}
+{% block title %}{{ link.name or link.id }} · {{ site_name }}{% endblock %}
+{% block content %}
+<div class="link-wrap">
+  <div class="landing-card">
+    <div class="file-glyph">
+      <svg class="icon"><use href="#i-folder"/></svg>
+    </div>
+    <span class="eyebrow">Shared file</span>
+    <h1 class="link-title">{{ link.name or link.id }}</h1>
+    <p class="muted link-note">
+      {% if link.note %}{{ link.note }}{% else %}Choose how you want this file delivered.{% endif %}
+    </p>
+
+    {% if locked %}
+      {% if error %}<div class="alert alert-bad">{{ error }}</div>{% endif %}
+      <form method="post" action="/u/{{ link.id }}" class="form-stack password-form">
+        <input type="hidden" name="next" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+        <label class="field">
+          <span>This file is protected</span>
+          <input class="input" type="password" name="password" placeholder="Enter the password" autofocus required>
+        </label>
+        <button class="btn btn-primary btn-block" type="submit">Unlock file</button>
+      </form>
+      <p class="muted tiny">Ask whoever sent you the link for the password.</p>
+    {% else %}
+      <div class="landing-actions">
+        {% if link.allow_stream %}
+        <a class="btn btn-primary btn-lg" href="/s/{{ link.id }}{% if token %}?t={{ token }}{% endif %}">
+          <svg class="icon"><use href="#i-activity"/></svg> Stream file
+        </a>
+        <a class="btn btn-ghost btn-lg" href="/s/{{ link.id }}?download=1{% if token %}&t={{ token }}{% endif %}">
+          <svg class="icon"><use href="#i-download"/></svg> Download
+        </a>
+        {% endif %}
+        {% if link.allow_forward %}
+        <a class="btn btn-ghost btn-lg" href="/f/{{ link.id }}{% if token %}?t={{ token }}{% endif %}">
+          <svg class="icon"><use href="#i-external"/></svg> Open source
+        </a>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <dl class="file-facts">
+      <div><dt>Size</dt><dd>{{ link.size|human_size if link.size else "Unknown" }}</dd></div>
+      <div><dt>Added</dt><dd>{{ link.created_at|rel_time }}</dd></div>
+      <div><dt>Downloads</dt><dd>{{ link.downloads }}{% if link.max_downloads %} / {{ link.max_downloads }}{% endif %}</dd></div>
+      {% if link.expires_at %}<div><dt>Expires</dt><dd>{{ link.expires_at|fmt_time }}</dd></div>{% endif %}
+      <div><dt>Delivery</dt><dd>{% if link.mode == 'forward' %}Forward{% else %}Stream{% endif %}</dd></div>
+    </dl>
+  </div>
+  <p class="public-hint">Links are served by {{ site_name }}. Contact the owner if this file should not be here.</p>
+</div>
+{% endblock %}

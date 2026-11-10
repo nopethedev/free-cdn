@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Overview · {{ site_name }}{% endblock %}
+{% block page_title %}Overview{% endblock %}
+{% block page_sub %}Traffic, nodes and recent activity at a glance.{% endblock %}
+{% block actions %}
+<a class="btn btn-primary" href="/admin/files"><svg class="icon"><use href="#i-plus"/></svg>New link</a>
+{% endblock %}
+{% block content %}
+<section class="stat-grid">
+  <article class="card stat">
+    <span class="stat-label">Links</span>
+    <strong class="stat-value">{{ stats.total }}</strong>
+    <span class="stat-meta">{{ modes.get('stream', 0) }} stream · {{ modes.get('forward', 0) }} forward</span>
+  </article>
+  <article class="card stat">
+    <span class="stat-label">Deliveries</span>
+    <strong class="stat-value">{{ stats.downloads }}</strong>
+    <span class="stat-meta">downloads and forwards</span>
+  </article>
+  <article class="card stat">
+    <span class="stat-label">Proxied</span>
+    <strong class="stat-value">{{ stats.served|human_size }}</strong>
+    <span class="stat-meta">bytes streamed through this server</span>
+  </article>
+  <article class="card stat">
+    <span class="stat-label">Nodes</span>
+    <strong class="stat-value">{{ online }}<span class="stat-dim">/{{ nodes|length }}</span></strong>
+    <span class="stat-meta">online right now</span>
+  </article>
+</section>
+
+<section class="grid-2">
+  <article class="card">
+    <header class="card-head">
+      <div><h2>Recent links</h2><p>Newest short links across your account.</p></div>
+      <a class="card-link" href="/admin/links">All links →</a>
+    </header>
+    {% if recent_links %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>File</th><th>Mode</th><th>Short link</th><th class="num">Hits</th><th></th></tr></thead>
+        <tbody>
+        {% for link in recent_links %}
+          <tr>
+            <td class="cell-main">
+              <a href="/admin/links/{{ link.id }}">{{ link.name or link.id }}</a>
+              <small>{{ link.node_name or (link.url and 'external URL') or '—' }}</small>
+            </td>
+            <td><span class="badge badge-{{ 'accent' if link.mode == 'stream' else 'plain' }}">{{ link.mode }}</span></td>
+            <td>
+              <button class="copy-chip" data-copy="{{ urls[link.id].short }}" title="Copy short link">
+                <span class="mono">/{{ link.id }}</span>
+                <svg class="icon"><use href="#i-copy"/></svg>
+              </button>
+            </td>
+            <td class="num">{{ link.downloads }}</td>
+            <td class="cell-actions"><a class="btn btn-ghost btn-sm" href="/admin/links/{{ link.id }}">Open</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="empty"><p>No links yet. Create one from a file or a share URL.</p><a class="btn btn-primary btn-sm" href="/admin/files">Browse files</a></div>
+    {% endif %}
+  </article>
+
+  <article class="card">
+    <header class="card-head">
+      <div><h2>Nodes</h2><p>Storage endpoints Cascade can route to.</p></div>
+      <a class="card-link" href="/admin/nodes">Manage →</a>
+    </header>
+    {% if nodes %}
+      <ul class="node-list">
+      {% for item in nodes %}
+        <li>
+          <span class="status-dot status-{{ item.node.status }}"></span>
+          <div class="node-list-main">
+            <strong>{{ item.node.name }}</strong>
+            <small>{{ item.kind_label }}{% if item.node.latency_ms %} · {{ item.node.latency_ms }} ms{% endif %}</small>
+          </div>
+          <span class="badge {{ 'badge-bad' if not item.node.enabled else 'badge-plain' }}">{{ 'off' if not item.node.enabled else item.node.status }}</span>
+          <span class="chip-row">{% for cap in item.caps[:3] %}<span class="chip">{{ cap }}</span>{% endfor %}</span>
+        </li>
+      {% endfor %}
+      </ul>
+    {% else %}
+      <div class="empty"><p>No nodes connected yet.</p><a class="btn btn-primary btn-sm" href="/admin/nodes">Add a node</a></div>
+    {% endif %}
+  </article>
+</section>
+
+<section class="grid-2">
+  <article class="card">
+    <header class="card-head">
+      <div><h2>Quick link</h2><p>Paste a Dropbox, Drive, TeraBox or direct URL.</p></div>
+    </header>
+    <form class="quick-form" id="quick-link-form">
+      <input class="input" id="quick-url" type="url" placeholder="https://www.dropbox.com/s/…" required>
+      <select class="select" id="quick-mode">
+        <option value="stream">/s/ stream</option>
+        <option value="forward">/f/ forward</option>
+      </select>
+      <button class="btn btn-primary" type="submit">Create</button>
+    </form>
+    <div class="quick-result" id="quick-result" hidden></div>
+    <p class="muted tiny">Public share links are resolved to direct CDN URLs automatically when possible.</p>
+  </article>
+
+  <article class="card">
+    <header class="card-head">
+      <div><h2>Jobs</h2><p>Replication runs in the background.</p></div>
+    </header>
+    {% if jobs %}
+      <ul class="job-list">
+      {% for job in jobs %}
+        <li data-job="{{ job.id }}">
+          <div class="job-top">
+            <span class="mono">{{ job.id[:8] }}</span>
+            <span class="badge badge-{{ 'ok' if job.status == 'done' else 'bad' if job.status == 'error' else 'warn' }}">{{ job.status }}</span>
+          </div>
+          <div class="job-msg">{{ job.message or job.kind }}</div>
+          <div class="progress"><span style="width: {{ ((job.done / job.total * 100) if job.total else 0)|round(1) }}%"></span></div>
+          <small class="muted">{{ job.done|human_size }}{% if job.total %} of {{ job.total|human_size }}{% endif %} · {{ job.updated_at|rel_time }}</small>
+        </li>
+      {% endfor %}
+      </ul>
+    {% else %}
+      <div class="empty"><p>No jobs yet. Replicate a file from the Files tab.</p></div>
+    {% endif %}
+  </article>
+</section>
+
+<section class="card">
+  <header class="card-head">
+    <div><h2>Recent deliveries</h2><p>Every stream and forward records an event.</p></div>
+    {% if user.role == 'admin' %}<a class="card-link" href="/admin/activity">All activity →</a>{% endif %}
+  </header>
+  {% if events %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>File</th><th>Mode</th><th>Bytes</th><th>When</th></tr></thead>
+      <tbody>
+      {% for event in events %}
+        <tr>
+          <td class="cell-main">{{ event.link_name or event.link_id }}<small class="mono">/{{ event.link_id }}</small></td>
+          <td><span class="badge badge-plain">{{ event.kind }}</span></td>
+          <td class="mono">{{ event.bytes|human_size if event.bytes else '—' }}</td>
+          <td class="muted">{{ event.ts|rel_time }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<div class="empty"><p>No deliveries yet.</p></div>{% endif %}
+</section>
+{% endblock %}

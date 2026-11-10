@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ site_name }}{% endblock %}</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <meta name="robots" content="noindex">
+  <style>:root { --accent: {{ accent }}; }</style>
+</head>
+<body class="public-body">
+  {% include "partials_icons.html" %}
+  <header class="public-top">
+    <a class="brand brand-compact" href="/">
+      <span class="brand-mark">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 20.5 16 6l10 14.5h-5.5L16 12.7l-4.5 7.8z" fill="currentColor" opacity=".95"/><path d="M10 24h12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </span>
+      <span class="brand-text"><strong>{{ site_name }}</strong><small>file router</small></span>
+    </a>
+    <nav class="public-nav">
+      {% if user %}
+        <a class="btn btn-sm" href="/admin">Open panel</a>
+      {% else %}
+        <a class="btn btn-sm btn-ghost" href="/login">Sign in</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main class="public-main">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="public-foot">
+    <span>{{ site_name }} · routed by Cascade v{{ app_version }}</span>
+  </footer>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script>window.CASCADE = Object.assign({csrf: {{ csrf|tojson }}}, {{ (bootstrap|default({}))|tojson }});</script>
+  <script src="/static/app.js" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,15 @@
+{% extends "layout_public.html" %}
+{% block title %}{{ title }} · {{ site_name }}{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card error-card">
+    <span class="eyebrow">Error {{ status_code }}</span>
+    <h1>{{ title }}</h1>
+    <p class="muted">{{ message }}</p>
+    <div class="error-actions">
+      <a class="btn btn-primary" href="/">Go home</a>
+      {% if user %}<a class="btn btn-ghost" href="/admin">Open panel</a>{% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

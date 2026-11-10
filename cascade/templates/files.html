@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Files · {{ site_name }}{% endblock %}
+{% block page_title %}Files{% endblock %}
+{% block page_sub %}Browse nodes, publish links and replicate files between hosts.{% endblock %}
+{% block content %}
+{% if nodes %}
+<section class="card file-shell">
+  <div class="file-top">
+    <label class="inline-field">
+      <span>Node</span>
+      <select class="select" id="node-select">
+        {% for node in nodes %}
+          <option value="{{ node.id }}" data-caps="{{ node.caps|join(',') }}">{{ node.name }} · {{ node.kind_label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn btn-ghost btn-sm" id="btn-up" title="Go to parent folder">
+      <svg class="icon"><use href="#i-arrow-left"/></svg>Up
+    </button>
+    <div class="spacer"></div>
+    {% if can_write %}
+      <input type="file" id="file-input" multiple hidden>
+      <button class="btn" id="btn-upload"><svg class="icon"><use href="#i-upload"/></svg>Upload</button>
+      <button class="btn" id="btn-mkdir"><svg class="icon"><use href="#i-folder-plus"/></svg>New folder</button>
+    {% endif %}
+    <button class="btn btn-ghost" id="btn-refresh"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button>
+  </div>
+
+  {% if can_write %}
+  <div class="dropzone" id="dropzone">
+    <svg class="icon"><use href="#i-upload"/></svg>
+    <span>Drop files here to upload to the current folder</span>
+  </div>
+  {% endif %}
+
+  <div class="file-toolbar">
+    <nav class="breadcrumb" id="breadcrumb" aria-label="Breadcrumb"></nav>
+    <span class="muted tiny" id="file-count"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table files-table">
+      <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th class="cell-actions">Actions</th></tr></thead>
+      <tbody id="file-rows">
+        <tr><td colspan="4" class="empty-row">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="drop-hint" id="upload-status" hidden></div>
+</section>
+{% else %}
+<section class="card empty big">
+  <span class="feature-icon"><svg class="icon"><use href="#i-server"/></svg></span>
+  <h2>No nodes yet</h2>
+  <p>A node is a place files live: local disk, FileBrowser, Dropbox, Drive or TeraBox.</p>
+  {% if user.role == 'admin' %}<a class="btn btn-primary" href="/admin/nodes">Connect a node</a>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Links · {{ site_name }}{% endblock %}
+{% block page_title %}Links{% endblock %}
+{% block page_sub %}Short ids that resolve to either a streamed proxy or a direct forward.{% endblock %}
+{% block actions %}
+<button class="btn btn-primary" id="btn-new-link"><svg class="icon"><use href="#i-plus"/></svg>New link</button>
+{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="list-toolbar">
+    <input class="input search" id="link-search" type="search" placeholder="Filter by name, id or node…">
+    <span class="muted tiny" id="link-count">{{ links|length }} link{{ '' if links|length == 1 else 's' }}</span>
+  </div>
+  {% if links %}
+  <div class="table-wrap">
+    <table class="table links-table" id="links-table">
+      <thead>
+        <tr><th>File</th><th>Delivery</th><th>Short</th><th class="num">Hits</th><th>State</th><th>Created</th><th class="cell-actions">Actions</th></tr>
+      </thead>
+      <tbody>
+      {% for link in links %}
+        <tr data-search="{{ (link.name or '')|lower }} {{ link.id|lower }} {{ (link.node_name or '')|lower }}" data-link-row="{{ link.id }}">
+          <td class="cell-main">
+            <a href="/admin/links/{{ link.id }}">{{ link.name or link.id }}</a>
+            <small>{{ link.node_name or 'external URL' }}{% if link.password_hash %} · locked{% endif %}{% if link.landing %} · landing{% endif %}</small>
+          </td>
+          <td><span class="badge badge-{{ 'accent' if link.mode == 'stream' else 'plain' }}">{{ link.mode }}</span></td>
+          <td>
+            <button class="copy-chip" data-copy="{{ urls[link.id].short }}" title="Copy short link">
+              <span class="mono">/{{ link.id }}</span><svg class="icon"><use href="#i-copy"/></svg>
+            </button>
+          </td>
+          <td class="num">{{ link.downloads }}</td>
+          <td><span class="badge badge-{{ 'ok' if link.enabled else 'bad' }}">{{ 'active' if link.enabled else 'off' }}</span></td>
+          <td class="muted">{{ link.created_at|rel_time }}</td>
+          <td class="cell-actions">
+            <div class="row-actions">
+              <button class="btn btn-ghost btn-sm" data-copy="{{ urls[link.id].stream }}" title="Copy /s/ link">/s/</button>
+              <button class="btn btn-ghost btn-sm" data-copy="{{ urls[link.id].forward }}" title="Copy /f/ link">/f/</button>
+              <button class="btn btn-ghost btn-sm" data-link-toggle="{{ link.id }}" data-link-enabled="{{ 1 if link.enabled else 0 }}" title="{{ 'Disable' if link.enabled else 'Enable' }} link">
+                <svg class="icon"><use href="#i-{{ 'x' if link.enabled else 'check' }}"/></svg>
+              </button>
+              <button class="btn btn-ghost btn-sm btn-danger-ghost" data-link-delete="{{ link.id }}" title="Delete link">
+                <svg class="icon"><use href="#i-trash"/></svg>
+              </button>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="empty big">
+      <span class="feature-icon"><svg class="icon"><use href="#i-link"/></svg></span>
+      <h2>No links yet</h2>
+      <p>Create one from a file in the browser, or paste a share URL.</p>
+      <button class="btn btn-primary" data-open-new-link>Create your first link</button>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

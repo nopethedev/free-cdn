@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ site_name }}{% endblock %}
+{% block page_title %}Settings{% endblock %}
+{% block page_sub %}Server behaviour, defaults and programmatic access.{% endblock %}
+{% block content %}
+<form id="settings-form" class="settings-form">
+  <div class="settings-grid">
+    <section class="card">
+      <header class="card-head"><div><h2>Branding</h2><p>Shown in the panel and on public pages.</p></div></header>
+      <label class="field"><span>Site name</span><input class="input" name="site_name" value="{{ values.site_name }}"></label>
+      <label class="field"><span>Tagline</span><input class="input" name="tagline" value="{{ values.tagline }}"></label>
+      <label class="field"><span>Accent colour</span>
+        <div class="color-row">
+          <input class="input color-input" type="color" name="accent" value="{{ values.accent }}">
+          <code class="mono">{{ values.accent }}</code>
+        </div>
+      </label>
+      <label class="field"><span>Public base URL</span>
+        <input class="input" name="public_base_url" value="{{ values.public_base_url }}" placeholder="https://cdn.example.com">
+        <small>Used when generating links. Leave empty to use the request host.</small>
+      </label>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><div><h2>Links</h2><p>Defaults for new short ids.</p></div></header>
+      <div class="field-row">
+        <label class="field"><span>Default delivery</span>
+          <select class="select" name="default_mode">
+            <option value="stream" {% if values.default_mode == 'stream' %}selected{% endif %}>Stream proxy (/s/)</option>
+            <option value="forward" {% if values.default_mode == 'forward' %}selected{% endif %}>Forward (/f/)</option>
+          </select>
+        </label>
+        <label class="field"><span>Short id length</span><input class="input" type="number" min="4" max="24" name="short_length" value="{{ values.short_length }}"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="landing_default" {% if values.landing_default == '1' %}checked{% endif %}> Show a landing page before delivery</label>
+      <label class="check"><input type="checkbox" name="robots_noindex" {% if values.robots_noindex == '1' %}checked{% endif %}> Ask search engines to ignore public links</label>
+      <label class="field"><span>Rate limit (requests / minute / link / IP)</span><input class="input" type="number" min="0" name="link_rate_limit" value="{{ values.link_rate_limit }}"></label>
+      <label class="check"><input type="checkbox" name="ytdlp_enabled" {% if values.ytdlp_enabled == '1' %}checked{% endif %}> Allow yt-dlp to resolve awkward hosts</label>
+      <label class="field"><span>yt-dlp binary</span><input class="input" name="ytdlp_path" value="{{ values.ytdlp_path }}" placeholder="yt-dlp"></label>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><div><h2>Access</h2><p>Who can get in.</p></div></header>
+      <label class="check"><input type="checkbox" name="public_signup" {% if values.public_signup == '1' %}checked{% endif %}> Allow public sign-up</label>
+      <div class="field-row">
+        <label class="field"><span>Max links per user</span><input class="input" type="number" min="0" name="max_links_per_user" value="{{ values.max_links_per_user }}"><small>0 means unlimited.</small></label>
+        <label class="field"><span>Session lifetime (days)</span><input class="input" type="number" min="1" max="365" name="session_days" value="{{ values.session_days }}"></label>
+      </div>
+      <label class="field"><span>Max upload size (MB)</span><input class="input" type="number" min="1" name="max_upload_mb" value="{{ values.max_upload_mb }}"></label>
+      <p class="muted tiny">Uploads spool through the server. Keep this sane for large media.</p>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><div><h2>API keys</h2><p>Create links from scripts or CI.</p></div></header>
+      <div class="keys-list" id="keys-list">
+        {% for key in api_keys %}
+          <div class="key-row" data-key-row="{{ key.id }}">
+            <div><strong>{{ key.name }}</strong><small class="mono">{{ key.prefix }}…</small></div>
+            <span class="muted tiny">{{ 'used ' + (key.last_used_at|rel_time) if key.last_used_at else 'never used' }}</span>
+            <button class="btn btn-ghost btn-sm btn-danger-ghost" type="button" data-key-delete="{{ key.id }}"><svg class="icon"><use href="#i-trash"/></svg></button>
+          </div>
+        {% else %}
+          <p class="muted tiny" id="keys-empty">No keys yet.</p>
+        {% endfor %}
+      </div>
+      <button class="btn btn-sm" type="button" id="btn-create-key"><svg class="icon"><use href="#i-plus"/></svg>Create API key</button>
+      <div class="code-block mono">
+        curl -X POST {{ values.public_base_url or 'https://your-host' }}/api/v1/links \<br>
+        &nbsp;&nbsp;-H "Authorization: Bearer csd_…" \<br>
+        &nbsp;&nbsp;-H "Content-Type: application/json" \<br>
+        &nbsp;&nbsp;-d '{"url":"https://www.dropbox.com/s/…","mode":"forward"}'
+      </div>
+    </section>
+  </div>
+
+  <div class="form-actions sticky-actions">
+    <span class="muted tiny" id="settings-state"></span>
+    <button class="btn btn-primary" type="submit">Save settings</button>
+  </div>
+</form>
+{% endblock %}

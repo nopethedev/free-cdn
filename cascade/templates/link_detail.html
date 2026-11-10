@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ link.name or link.id }} · {{ site_name }}{% endblock %}
+{% block page_title %}{{ link.name or link.id }}{% endblock %}
+{% block page_sub %}<span class="mono">/{{ link.id }}</span> · {{ link.mode }} delivery{% endblock %}
+{% block actions %}
+<a class="btn btn-ghost" href="/admin/links">Back to links</a>
+{% endblock %}
+{% block content %}
+<section class="grid-2">
+  <article class="card">
+    <header class="card-head"><div><h2>Delivery</h2><p>Both endpoints work unless you disable them.</p></div></header>
+    <div class="url-list">
+      <div class="url-row">
+        <div><span class="url-label">Short</span><code class="mono">{{ urls.short }}</code></div>
+        <button class="btn btn-sm" data-copy="{{ urls.short }}"><svg class="icon"><use href="#i-copy"/></svg>Copy</button>
+      </div>
+      <div class="url-row">
+        <div><span class="url-label">Stream proxy</span><code class="mono">{{ urls.stream }}</code></div>
+        <button class="btn btn-sm" data-copy="{{ urls.stream }}"><svg class="icon"><use href="#i-copy"/></svg>Copy</button>
+      </div>
+      <div class="url-row">
+        <div><span class="url-label">Forward</span><code class="mono">{{ urls.forward }}</code></div>
+        <button class="btn btn-sm" data-copy="{{ urls.forward }}"><svg class="icon"><use href="#i-copy"/></svg>Copy</button>
+      </div>
+    </div>
+    <dl class="file-facts detail-facts">
+      <div><dt>Source</dt><dd>{{ node_name or 'External URL' }}</dd></div>
+      {% if link.path %}<div><dt>Path</dt><dd class="mono">{{ link.path }}</dd></div>{% endif %}
+      {% if link.url %}<div><dt>URL</dt><dd class="mono truncate">{{ link.url }}</dd></div>{% endif %}
+      <div><dt>State</dt><dd><span class="badge badge-{{ 'ok' if state == 'active' else 'bad' }}">{{ state }}</span></dd></div>
+      <div><dt>Downloads</dt><dd>{{ link.downloads }}{% if link.max_downloads %} / {{ link.max_downloads }}{% endif %}</dd></div>
+      <div><dt>Served</dt><dd>{{ link.bytes_served|human_size }}</dd></div>
+      <div><dt>Created</dt><dd>{{ link.created_at|fmt_time }}</dd></div>
+      <div><dt>Expires</dt><dd>{{ link.expires_at|fmt_time if link.expires_at else 'Never' }}</dd></div>
+      <div><dt>Password</dt><dd>{{ 'Yes' if link.password_hash else 'No' }}</dd></div>
+    </dl>
+  </article>
+
+  <article class="card">
+    <header class="card-head"><div><h2>Settings</h2><p>Changes apply immediately.</p></div></header>
+    <form id="link-settings-form" class="form-stack" data-link-id="{{ link.id }}"
+          data-expires-at="{{ link.expires_at or 0 }}" data-max-downloads="{{ link.max_downloads or 0 }}">
+      <label class="field"><span>Name</span><input class="input" name="name" value="{{ link.name or '' }}"></label>
+      <label class="field"><span>Default delivery (short link)</span>
+        <select class="select" name="mode">
+          <option value="stream" {% if link.mode == 'stream' %}selected{% endif %}>Stream through the proxy</option>
+          <option value="forward" {% if link.mode == 'forward' %}selected{% endif %}>Forward to the source URL</option>
+        </select>
+      </label>
+      <div class="check-grid">
+        <label class="check"><input type="checkbox" name="allow_stream" {% if link.allow_stream %}checked{% endif %}> Allow /s/ streaming</label>
+        <label class="check"><input type="checkbox" name="allow_forward" {% if link.allow_forward %}checked{% endif %}> Allow /f/ forwarding</label>
+        <label class="check"><input type="checkbox" name="landing" {% if link.landing %}checked{% endif %}> Show a landing page</label>
+        <label class="check"><input type="checkbox" name="enabled" {% if link.enabled %}checked{% endif %}> Link enabled</label>
+      </div>
+      <div class="field-row">
+        <label class="field"><span>Expires in (hours)</span><input class="input" name="expires_hours" type="number" min="0" step="1" placeholder="never" value="{% if link.expires_at and link.expires_at > now_ts %}{{ ((link.expires_at - now_ts) / 3600)|round(0, 'ceil')|int }}{% endif %}"></label>
+        <label class="field"><span>Max downloads</span><input class="input" name="max_downloads" type="number" min="0" step="1" placeholder="unlimited" value="{{ link.max_downloads or '' }}"></label>
+      </div>
+      <label class="field"><span>Password</span><input class="input" name="password" type="password" placeholder="{{ 'Leave blank to keep current password' if link.password_hash else 'Optional' }}"></label>
+      {% if link.password_hash %}<label class="check"><input type="checkbox" name="clear_password"> Remove password</label>{% endif %}
+      <label class="field"><span>Note shown on the landing page</span><input class="input" name="note" value="{{ link.note or '' }}" placeholder="Optional message"></label>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Save changes</button>
+        <button class="btn btn-ghost btn-danger-ghost" type="button" data-link-delete="{{ link.id }}">Delete link</button>
+      </div>
+    </form>
+  </article>
+</section>
+
+<section class="card">
+  <header class="card-head"><div><h2>Recent deliveries</h2><p>Newest first, capped at 100.</p></div></header>
+  {% if events %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>When</th><th>Mode</th><th>Bytes</th><th>IP</th><th>User agent</th></tr></thead>
+      <tbody>
+      {% for event in events %}
+        <tr>
+          <td class="muted">{{ event.ts|fmt_time }}</td>
+          <td><span class="badge badge-plain">{{ event.kind }}</span></td>
+          <td class="mono">{{ event.bytes|human_size if event.bytes else '—' }}</td>
+          <td class="mono">{{ event.ip or '—' }}</td>
+          <td class="muted truncate">{{ event.ua or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<div class="empty"><p>No deliveries yet.</p></div>{% endif %}
+</section>
+{% endblock %}

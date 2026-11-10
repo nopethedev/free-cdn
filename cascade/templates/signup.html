@@ -1,0 +1,30 @@
+{% extends "layout_public.html" %}
+{% set f = form|default({}) %}
+{% block title %}Create account · {{ site_name }}{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <span class="eyebrow">Join</span>
+    <h1>Create account</h1>
+    <p class="muted">You will be able to browse files and create links.</p>
+    {% if error %}<div class="alert alert-bad">{{ error }}</div>{% endif %}
+    <form method="post" action="/signup" class="form-stack">
+      <label class="field">
+        <span>Name</span>
+        <input class="input" type="text" name="name" value="{{ f.get('name', '') }}" autocomplete="name">
+      </label>
+      <label class="field">
+        <span>Email</span>
+        <input class="input" type="email" name="email" value="{{ f.get('email', '') }}" autocomplete="email" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input class="input" type="password" name="password" minlength="8" autocomplete="new-password" required>
+        <small>At least 8 characters.</small>
+      </label>
+      <button class="btn btn-primary btn-block" type="submit">Create account</button>
+    </form>
+    <p class="auth-foot">Already registered? <a href="/login">Sign in</a></p>
+  </div>
+</div>
+{% endblock %}

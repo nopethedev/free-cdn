@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Nodes · {{ site_name }}{% endblock %}
+{% block page_title %}Nodes{% endblock %}
+{% block page_sub %}Storage endpoints. One node is one place files can live.{% endblock %}
+{% block actions %}
+<button class="btn btn-primary" id="btn-add-node"><svg class="icon"><use href="#i-plus"/></svg>Add node</button>
+{% endblock %}
+{% block content %}
+{% if nodes %}
+<section class="node-grid">
+  {% for item in nodes %}
+  <article class="card node-card" data-node-card="{{ item.node.id }}">
+    <header class="node-head">
+      <span class="node-mark">{{ item.node.name[:2]|upper }}</span>
+      <div class="node-title">
+        <h3>{{ item.node.name }}</h3>
+        <span class="badge badge-plain">{{ item.kind_label }}</span>
+        {% if not item.node.enabled %}<span class="badge badge-bad">disabled</span>{% endif %}
+      </div>
+      <span class="status-pill status-{{ item.node.status }}"><span class="status-dot"></span>{{ item.node.status }}</span>
+    </header>
+    <p class="node-msg">{{ item.node.message or 'Not checked yet. Run a test to see latency.' }}</p>
+    {% if item.node.checked_at %}<p class="muted tiny">Checked {{ item.node.checked_at|rel_time }}{% if item.node.latency_ms %} · {{ item.node.latency_ms }} ms{% endif %}</p>{% endif %}
+    <div class="chip-row">
+      {% for cap in item.caps %}<span class="chip">{{ cap }}</span>{% else %}<span class="chip">no capabilities</span>{% endfor %}
+    </div>
+    <div class="node-config">
+      {% for key, value in item.config.items() %}
+        {% if loop.index <= 3 and value %}<div><span>{{ key }}</span><code class="mono truncate">{{ value if value is string else value|string }}</code></div>{% endif %}
+      {% endfor %}
+    </div>
+    <footer class="node-foot">
+      <button class="btn btn-sm" data-node-test="{{ item.node.id }}"><svg class="icon"><use href="#i-activity"/></svg>Test</button>
+      <button class="btn btn-ghost btn-sm" data-node-edit="{{ item.node.id }}"><svg class="icon"><use href="#i-edit"/></svg>Edit</button>
+      <label class="switch" title="Enable or disable this node">
+        <input type="checkbox" data-node-toggle="{{ item.node.id }}" {% if item.node.enabled %}checked{% endif %}>
+        <span></span>
+      </label>
+      <button class="btn btn-ghost btn-sm btn-danger-ghost" data-node-delete="{{ item.node.id }}"><svg class="icon"><use href="#i-trash"/></svg></button>
+    </footer>
+  </article>
+  {% endfor %}
+</section>
+{% else %}
+<section class="card empty big">
+  <span class="feature-icon"><svg class="icon"><use href="#i-server"/></svg></span>
+  <h2>Connect your first place</h2>
+  <p>Local disk works instantly. FileBrowser, Dropbox, Drive and TeraBox take a few credentials.</p>
+  <button class="btn btn-primary" data-add-node>Add a node</button>
+</section>
+{% endif %}
+
+<section class="card hint-card">
+  <h2>How routing works</h2>
+  <div class="hint-grid">
+    <div><h3><span class="mono">/s/</span> stream</h3><p>Cascade pulls bytes from the node and writes them to the visitor, preserving Range requests so video seeks work. Nothing about the source is exposed.</p></div>
+    <div><h3><span class="mono">/f/</span> forward</h3><p>A 302 to the resolved direct URL. Best for Dropbox, Drive and TeraBox where the CDN should carry the transfer. Local links fall back to streaming.</p></div>
+    <div><h3>Replication</h3><p>Copies stream node-to-node in the background. Targets must be writable nodes: local disk or FileBrowser.</p></div>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "layout_public.html" %}
+{% set f = form|default({}) %}
+{% block title %}Set up {{ site_name }}{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <span class="eyebrow"><span class="pulse"></span> First run</span>
+    <h1>Create the admin</h1>
+    <p class="muted">This account owns the panel. You can add more people later.</p>
+    {% if error %}<div class="alert alert-bad">{{ error }}</div>{% endif %}
+    <form method="post" action="/setup" class="form-stack">
+      <label class="field">
+        <span>Name</span>
+        <input class="input" type="text" name="name" value="{{ f.get('name', 'Administrator') }}" required>
+      </label>
+      <label class="field">
+        <span>Email</span>
+        <input class="input" type="email" name="email" value="{{ f.get('email', '') }}" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input class="input" type="password" name="password" minlength="8" required>
+        <small>At least 8 characters.</small>
+      </label>
+      <label class="field">
+        <span>Confirm password</span>
+        <input class="input" type="password" name="confirm" minlength="8" required>
+      </label>
+      <button class="btn btn-primary btn-block" type="submit">Create account</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

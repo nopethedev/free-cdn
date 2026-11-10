@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Activity · {{ site_name }}{% endblock %}
+{% block page_title %}Activity{% endblock %}
+{% block page_sub %}Administrative actions and delivery events.{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="card-head"><div><h2>Audit log</h2><p>Admin and account actions, newest first.</p></div></header>
+  {% if audit_rows %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th><th>IP</th></tr></thead>
+      <tbody>
+      {% for row in audit_rows %}
+        <tr>
+          <td class="muted nowrap">{{ row.ts|fmt_time }}</td>
+          <td>{{ row.user_email or 'system' }}</td>
+          <td><span class="badge badge-plain">{{ row.action }}</span></td>
+          <td class="mono truncate muted">{{ row.detail or '—' }}</td>
+          <td class="mono muted">{{ row.ip or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<div class="empty"><p>Nothing logged yet.</p></div>{% endif %}
+</section>
+
+<section class="card">
+  <header class="card-head"><div><h2>Deliveries</h2><p>Every stream and forward, newest first.</p></div></header>
+  {% if events %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>When</th><th>Link</th><th>Mode</th><th>Bytes</th><th>IP</th></tr></thead>
+      <tbody>
+      {% for event in events %}
+        <tr>
+          <td class="muted nowrap">{{ event.ts|fmt_time }}</td>
+          <td class="cell-main"><a href="/admin/links/{{ event.link_id }}">{{ event.link_name or event.link_id }}</a><small class="mono">/{{ event.link_id }}</small></td>
+          <td><span class="badge badge-plain">{{ event.kind }}</span></td>
+          <td class="mono">{{ event.bytes|human_size if event.bytes else '—' }}</td>
+          <td class="mono muted">{{ event.ip or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<div class="empty"><p>No deliveries yet.</p></div>{% endif %}
+</section>
+{% endblock %}

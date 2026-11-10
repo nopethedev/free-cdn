@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}People · {{ site_name }}{% endblock %}
+{% block page_title %}People{% endblock %}
+{% block page_sub %}Accounts that can sign in. Admins manage nodes, files and settings.{% endblock %}
+{% block actions %}
+<button class="btn btn-primary" id="btn-add-user"><svg class="icon"><use href="#i-plus"/></svg>Add person</button>
+{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="table-wrap">
+    <table class="table users-table">
+      <thead><tr><th>Person</th><th>Role</th><th class="num">Links</th><th>Status</th><th>Joined</th><th class="cell-actions">Actions</th></tr></thead>
+      <tbody>
+      {% for person in users %}
+        <tr data-user-row="{{ person.id }}">
+          <td class="cell-main">
+            <span class="avatar avatar-sm">{{ person.name[:1]|upper }}</span>
+            <div><strong>{{ person.name }}</strong><small>{{ person.email }}</small></div>
+          </td>
+          <td>
+            <select class="select select-sm" data-user-role="{{ person.id }}" {% if person.id == user.id %}title="You cannot change your own role here"{% endif %}>
+              <option value="user" {% if person.role == 'user' %}selected{% endif %}>user</option>
+              <option value="admin" {% if person.role == 'admin' %}selected{% endif %}>admin</option>
+            </select>
+          </td>
+          <td class="num">{{ person.link_count }}</td>
+          <td>
+            {% if person.disabled %}<span class="badge badge-bad">disabled</span>
+            {% else %}<span class="badge badge-ok">active</span>{% endif %}
+          </td>
+          <td class="muted">{{ person.created_at|rel_time }}</td>
+          <td class="cell-actions">
+            <div class="row-actions">
+              <button class="btn btn-ghost btn-sm" data-user-password="{{ person.id }}" title="Set a new password"><svg class="icon"><use href="#i-edit"/></svg></button>
+              {% if person.disabled %}
+                <button class="btn btn-ghost btn-sm" data-user-enable="{{ person.id }}" title="Enable account"><svg class="icon"><use href="#i-check"/></svg></button>
+              {% else %}
+                <button class="btn btn-ghost btn-sm" data-user-disable="{{ person.id }}" title="Disable account"><svg class="icon"><use href="#i-x"/></svg></button>
+              {% endif %}
+              <button class="btn btn-ghost btn-sm btn-danger-ghost" data-user-delete="{{ person.id }}" title="Delete account" {% if person.id == user.id %}disabled{% endif %}><svg class="icon"><use href="#i-trash"/></svg></button>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+<section class="card hint-card">
+  <h2>Roles</h2>
+  <div class="hint-grid">
+    <div><h3>Admin</h3><p>Full control: nodes, uploads, deletion, replication, people and settings.</p></div>
+    <div><h3>User</h3><p>Can browse nodes read-only, download files and create their own links within the configured limit.</p></div>
+    <div><h3>Session safety</h3><p>Changing a password signs that person out everywhere. Sessions last {{ config_values.get('session_days', '7') }} days.</p></div>
+  </div>
+</section>
+{% endblock %}
