@@ -2543,6 +2543,7 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
         "label": "Dropbox",
         "group": "Cloud drives",
         "blurb": "Sign in to browse, stream and upload, or paste an access token as a manual fallback.",
+        "oauth": True,
         "fields": [
             {
                 "key": "access_token",
@@ -2556,6 +2557,7 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
         "label": "Google Drive",
         "group": "Cloud drives",
         "blurb": "Sign in to browse, stream and upload Drive files, or resolve public share links.",
+        "oauth": True,
         "fields": [
             {
                 "key": "access_token",
@@ -2575,6 +2577,7 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
         "label": "Microsoft OneDrive",
         "group": "Cloud drives",
         "blurb": "Sign in with Microsoft to browse, stream and upload OneDrive files.",
+        "oauth": True,
         "fields": [
             {
                 "key": "access_token",
@@ -2595,12 +2598,21 @@ NODE_KINDS: dict[str, dict[str, Any]] = {
         "label": "TeraBox",
         "group": "Cloud drives",
         "blurb": "Resolve TeraBox share links via page API, yt-dlp, or a URL template.",
+        "browser_login": {
+            "label": "Sign in with browser",
+            "hint": (
+                "Opens a Chromium window on the machine running Cascade. Sign in normally; "
+                "Cascade saves the session cookie and closes the window when it expires."
+            ),
+        },
         "fields": [
             {
                 "key": "cookie",
                 "label": "Browser cookie",
                 "type": "password",
-                "help": "Optional. Paste the ndus=... cookie for private shares.",
+                "help": (
+                    "Optional. Use Sign in with browser in Add node; paste ndus=... only as a fallback."
+                ),
             },
             {
                 "key": "direct_url_template",
@@ -2676,6 +2688,8 @@ def node_kinds_for_ui() -> list[dict[str, Any]]:
                 "group": meta.get("group", "Other"),
                 "blurb": meta["blurb"],
                 "fields": meta["fields"],
+                "oauth": bool(meta.get("oauth")),
+                "browser_login": meta.get("browser_login"),
             }
         )
     return out

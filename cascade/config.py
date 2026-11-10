@@ -52,6 +52,12 @@ class Settings:
         self.admin_password = os.environ.get("CASCADE_ADMIN_PASSWORD") or None
         self.trust_proxy = _env_bool("CASCADE_TRUST_PROXY", False)
         self.cookie_secure = _env_bool("CASCADE_COOKIE_SECURE", False)
+        self.browser_login_enabled = _env_bool("CASCADE_BROWSER_LOGIN", True)
+        try:
+            raw_timeout = int(os.environ.get("CASCADE_BROWSER_LOGIN_TIMEOUT", "600"))
+        except ValueError:
+            raw_timeout = 600
+        self.browser_login_timeout = max(120, min(1800, raw_timeout))
         self.ytdlp_path = os.environ.get("CASCADE_YTDLP", "yt-dlp")
         self.base_dir = BASE_DIR
         self.package_dir = Path(__file__).resolve().parent

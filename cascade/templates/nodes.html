@@ -46,7 +46,7 @@
 <section class="card empty big">
   <span class="feature-icon"><svg class="icon"><use href="#i-server"/></svg></span>
   <h2>Connect your first place</h2>
-  <p>Local disk only needs a name. S3, WebDAV, FileBrowser, Dropbox, Drive, OneDrive and TeraBox take a few credentials.</p>
+  <p>Local disk only needs a name. S3, WebDAV and FileBrowser take credentials; Dropbox, Drive and OneDrive sign in with OAuth; TeraBox can use browser sign-in.</p>
   <button class="btn btn-primary" data-add-node>Add a node</button>
 </section>
 {% endif %}
@@ -57,14 +57,28 @@
   <div class="hero-actions">
     {% for provider in oauth_providers %}
       {% if provider.configured %}
-        <a class="btn" href="/oauth/{{ provider.kind }}/start">Connect {{ provider.label }}</a>
+        <a class="btn" href="/oauth/{{ provider.kind }}/start" target="_blank" rel="noopener">Connect {{ provider.label }}</a>
       {% else %}
         <span class="btn btn-ghost" aria-disabled="true" title="Add this provider's OAuth client ID and secret to .env first">{{ provider.label }} not configured</span>
       {% endif %}
     {% endfor %}
   </div>
   <p class="muted tiny">Configure OAuth client credentials in .env. The callback URL is <span class="mono">/oauth/&lt;provider&gt;/callback</span> on this site's public base URL.</p>
+  {% if browser_login_enabled %}
+  <div class="hero-actions">
+    <button class="btn" data-add-node-kind="terabox">Sign in to TeraBox</button>
+  </div>
+  {% endif %}
 </section>
+
+{% if browser_login_enabled %}
+<section class="card hint-card">
+  <h2>Browser sign-in for TeraBox</h2>
+  <p>Private TeraBox shares need a session cookie. Open <strong>Add node</strong>, choose TeraBox, and press <strong>Sign in with browser</strong>. A Chromium window opens on the computer running Cascade, waits for you to sign in, then saves the cookie. The window expires after {{ browser_login_minutes }} minutes.</p>
+  <p class="muted tiny">TeraBox uses a local browser cookie capture because it has no OAuth API for this. Dropbox, Google Drive and OneDrive use provider OAuth instead; their APIs reject session cookies.</p>
+  <p class="muted tiny">This needs Playwright with Chromium on the same machine as Cascade. The cookie is stored in SQLite and never shown on this page.</p>
+</section>
+{% endif %}
 
 <section class="card hint-card">
   <h2>Adding a node</h2>

@@ -18,7 +18,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import db, jobs
+from .. import browser_login, db, jobs
 from ..deps import Auth, client_ip, require_admin, require_auth
 from ..links import LinkError, create_link, link_row, link_summary, link_urls
 from ..nodes import (
@@ -232,6 +232,65 @@ async def create_node(request: Request, auth: Auth = Depends(require_admin)):
     db.audit(auth.user["id"], "node.created", {"id": node_id, "name": name, "kind": kind}, client_ip(request))
     node = _get_node(node_id)
     return {"node": _node_json(node)}
+
+
+@router.post("/nodes/browser/start")
+async def browser_login_start(request: Request, auth: Auth = Depends(require_admin)):
+    payload = await _read_json(request)
+    kind = str(payload.get("kind") or "").strip()
+    raw_node = payload.get("node_id")
+    node_id = None
+    if raw_node not in (None, "", 0):
+        node_id = _int(raw_node, "node_id", minimum=1)
+        node = _get_node(node_id)
+        if node["kind"] != kind:
+            raise HTTPException(400, "browser sign-in kind does not match the node")
+    name = str(payload.get("name") or "").strip()
+    if len(name) > 80:
+        raise HTTPException(400, "name is too long")
+    try:
+        session = browser_login.start(
+            kind,
+            auth.user["id"],
+            node_id=node_id,
+            name=name,
+            ip=client_ip(request),
+        )
+    except browser_login.BrowserLoginError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.audit(
+        auth.user["id"],
+        "node.browser_login_started",
+        {"kind": kind, "node_id": node_id},
+        client_ip(request),
+    )
+    return {"session": session}
+
+
+@router.get("/nodes/browser/{session_id}")
+async def browser_login_status(session_id: str, auth: Auth = Depends(require_admin)):
+    try:
+        session = browser_login.status(session_id, auth.user["id"])
+    except browser_login.BrowserLoginNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"session": session}
+
+
+@router.post("/nodes/browser/{session_id}/cancel")
+async def browser_login_cancel(
+    session_id: str, request: Request, auth: Auth = Depends(require_admin)
+):
+    try:
+        session = browser_login.cancel(session_id, auth.user["id"])
+    except browser_login.BrowserLoginNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    db.audit(
+        auth.user["id"],
+        "node.browser_login_cancelled",
+        {"kind": session["kind"], "node_id": session.get("node_id")},
+        client_ip(request),
+    )
+    return {"session": session}
 
 
 @router.patch("/nodes/{node_id}")

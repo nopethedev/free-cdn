@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
 from .. import db
+from ..config import settings
 from ..deps import Auth, require_admin, require_auth
 from ..links import link_row, link_urls
 from ..nodes import NODE_KINDS, build_connector
@@ -201,6 +202,8 @@ async def nodes_page(
             "group": meta.get("group", "Other"),
             "blurb": meta["blurb"],
             "fields": meta["fields"],
+            "oauth": bool(meta.get("oauth")),
+            "browser_login": meta.get("browser_login"),
         }
         for kind, meta in NODE_KINDS.items()
     ]
@@ -217,6 +220,14 @@ async def nodes_page(
             }
             for item in node_rows
         ],
+        "oauthProviders": {
+            provider["kind"]: bool(provider["configured"])
+            for provider in configured_providers()
+        },
+        "browserLogin": {
+            "enabled": bool(settings.browser_login_enabled),
+            "timeout": int(settings.browser_login_timeout),
+        },
     }
     notice = None
     notice_kind = "info"
@@ -236,6 +247,8 @@ async def nodes_page(
         oauth_providers=configured_providers(),
         oauth_notice=notice,
         oauth_notice_kind=notice_kind,
+        browser_login_enabled=settings.browser_login_enabled,
+        browser_login_minutes=max(1, int(settings.browser_login_timeout) // 60),
         bootstrap=bootstrap,
     )
 

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, db, jobs
+from . import __version__, browser_login, db, jobs
 from .config import settings
 from .deps import (
     CSRF_EXEMPT_PREFIXES,
@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        browser_login.shutdown()
         await jobs.stop()
 
 

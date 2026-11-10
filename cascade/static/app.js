@@ -816,7 +816,7 @@
     return (C.kinds || []).find((item) => item.kind === kind) || { fields: [] };
   }
 
-  function nodeTypeOptions() {
+  function nodeTypeOptions(selected = "") {
     const groups = [];
     (C.kinds || []).forEach((kind) => {
       const name = kind.group || "Other";
@@ -831,15 +831,20 @@
       .map(
         (group) =>
           `<optgroup label="${escapeHtml(group.name)}">${group.kinds
-            .map((kind) => `<option value="${escapeHtml(kind.kind)}">${escapeHtml(kind.label)}</option>`)
+            .map(
+              (kind) =>
+                `<option value="${escapeHtml(kind.kind)}"${kind.kind === selected ? " selected" : ""}>${escapeHtml(
+                  kind.label
+                )}</option>`
+            )
             .join("")}</optgroup>`
       )
       .join("");
   }
 
-  function nodeFieldsHtml(kind, config = {}, secrets = {}) {
+  function nodeFieldsHtml(kind, config = {}, secrets = {}, editing = false) {
     const meta = nodeKindMeta(kind);
-    return (meta.fields || [])
+    const fields = (meta.fields || [])
       .map((field) => {
         const key = field.key;
         const isSecret = SECRET_KEYS.includes(key);
@@ -875,13 +880,163 @@
           )}" placeholder="${escapeHtml(placeholder)}"${required}>${help}</label>`;
       })
       .join("");
+    return browserSignInHtml(kind, meta, editing) + fields;
   }
 
-  function openNodeModal(node) {
+  function browserSignInHtml(kind, meta, editing) {
+    if (meta.oauth) {
+      if (editing) return "";
+      const configured = Boolean((C.oauthProviders || {})[kind]);
+      return `<div class="browser-login-box">
+        <div><strong>Connect ${escapeHtml(meta.label)}</strong>
+        <p>Sign in through the provider in a new window. Cascade stores refreshable tokens and creates the node for you.</p></div>
+        <button class="btn" type="button" data-oauth-connect="${escapeHtml(kind)}"${
+          configured ? "" : " disabled"
+        }>${configured ? `Sign in with ${escapeHtml(meta.label)}` : "OAuth not configured"}</button>
+        <div class="browser-login-status" data-browser-login-status hidden aria-live="polite"></div>
+        <small>${
+          configured
+            ? "The provider opens in a new window. This page reloads when you close it."
+            : `Add the ${escapeHtml(meta.label)} OAuth client ID and secret to .env first.`
+        }</small>
+      </div>`;
+    }
+    if (!meta.browser_login || !(C.browserLogin && C.browserLogin.enabled)) return "";
+    const minutes = Math.max(1, Math.round(Number(C.browserLogin.timeout || 600) / 60));
+    return `<div class="browser-login-box">
+      <div><strong>${escapeHtml(meta.browser_login.label || "Sign in with browser")}</strong>
+      <p>${escapeHtml(
+        meta.browser_login.hint || "Sign in in the browser window that opens on this computer."
+      )}</p></div>
+      <button class="btn" type="button" data-browser-login="${escapeHtml(kind)}">${escapeHtml(
+        meta.browser_login.label || "Sign in with browser"
+      )}</button>
+      <div class="browser-login-status" data-browser-login-status hidden aria-live="polite"></div>
+      <small>The window expires after ${minutes} minutes. The cookie is stored locally and is never sent back to this page.</small>
+    </div>`;
+  }
+
+  function browserStatus(panel, message, tone = "info") {
+    const status = panel ? panel.querySelector("[data-browser-login-status]") : null;
+    if (!status) return;
+    status.hidden = false;
+    status.className = `browser-login-status alert${
+      tone === "good" ? " alert-good" : tone === "bad" ? " alert-bad" : ""
+    }`;
+    status.textContent = message;
+  }
+
+  function formatCountdown(seconds) {
+    const total = Math.max(0, Number(seconds) || 0);
+    const mins = Math.floor(total / 60);
+    const secs = Math.floor(total % 60);
+    return `${mins}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function startOAuthConnect(button, modal) {
+    const kind = button.dataset.oauthConnect;
+    const panel = button.closest(".browser-login-box");
+    const nameInput = modal.body.querySelector("[name=name]");
+    const name = nameInput ? nameInput.value.trim() : "";
+    const url = `/oauth/${encodeURIComponent(kind)}/start${
+      name ? `?name=${encodeURIComponent(name)}` : ""
+    }`;
+    const popup = window.open(url, `cascade-oauth-${kind}`, "popup,width=560,height=760");
+    if (!popup) {
+      browserStatus(panel, "The sign-in window was blocked. Allow pop-ups and try again.", "bad");
+      return;
+    }
+    const save = modal.foot.querySelector(".btn-primary");
+    if (save) save.disabled = true;
+    button.disabled = true;
+    browserStatus(
+      panel,
+      "Complete sign-in in the new window. This page reloads when you close it.",
+      "info"
+    );
+    const timer = window.setInterval(() => {
+      if (!popup.closed) return;
+      window.clearInterval(timer);
+      location.reload();
+    }, 700);
+  }
+
+  async function startBrowserLogin(button, modal, nodeId) {
+    const kind = button.dataset.browserLogin;
+    const panel = button.closest(".browser-login-box");
+    const nameInput = modal.body.querySelector("[name=name]");
+    const save = modal.foot.querySelector(".btn-primary");
+    const originalLabel = button.textContent;
+    const resetButton = () => {
+      button.disabled = false;
+      button.classList.remove("is-busy");
+      button.textContent = originalLabel;
+      if (save) save.disabled = false;
+    };
+    button.disabled = true;
+    button.classList.add("is-busy");
+    button.textContent = "Starting browser...";
+    if (save) save.disabled = true;
+    browserStatus(panel, "Launching a Chromium window on the machine running Cascade...", "info");
+    let session;
+    try {
+      const data = await api("/api/nodes/browser/start", {
+        method: "POST",
+        json: {
+          kind,
+          node_id: nodeId || null,
+          name: nameInput ? nameInput.value.trim() : "",
+        },
+      });
+      session = data.session;
+    } catch (err) {
+      browserStatus(panel, err.message, "bad");
+      resetButton();
+      return;
+    }
+    button.textContent = "Waiting for sign-in...";
+    const update = async () => {
+      if (!document.body.contains(panel)) return;
+      try {
+        const data = await api(`/api/nodes/browser/${encodeURIComponent(session.id)}`);
+        const current = data.session;
+        const seconds = Math.max(
+          0,
+          Number(current.expires_at || 0) - Math.floor(Date.now() / 1000)
+        );
+        if (current.state === "success") {
+          browserStatus(panel, current.message || "Connected. Reloading...", "good");
+          toast("Browser sign-in complete");
+          window.setTimeout(() => location.reload(), 700);
+          return;
+        }
+        if (["error", "expired", "cancelled"].includes(current.state)) {
+          browserStatus(panel, current.message || "Browser sign-in did not finish.", "bad");
+          resetButton();
+          return;
+        }
+        browserStatus(
+          panel,
+          `Waiting for sign-in. The window expires in ${formatCountdown(seconds)}.`,
+          "info"
+        );
+        window.setTimeout(update, 1600);
+      } catch (err) {
+        browserStatus(panel, err.message, "bad");
+        resetButton();
+      }
+    };
+    window.setTimeout(update, 1200);
+  }
+
+  function openNodeModal(node, preferredKind = null) {
     const editing = Boolean(node);
     const kinds = C.kinds || [];
     if (!kinds.length) return toast("Node types unavailable", "bad");
-    const initialKind = editing ? node.kind : kinds[0].kind;
+    const preferred = !editing && preferredKind && kinds.some((item) => item.kind === preferredKind)
+      ? preferredKind
+      : "";
+    const initialKind = editing ? node.kind : preferred || kinds[0].kind;
     const initialMeta = nodeKindMeta(initialKind);
     const body = `
       <div class="alert alert-bad" id="node-form-error" hidden></div>
@@ -891,13 +1046,16 @@
       ${
         editing
           ? ""
-          : `<label class="field"><span>Provider <em class="req">*</em></span><select class="select" name="kind">${nodeTypeOptions()}</select></label>`
+          : `<label class="field"><span>Provider <em class="req">*</em></span><select class="select" name="kind">${nodeTypeOptions(
+              initialKind
+            )}</select></label>`
       }
       <p class="muted tiny" id="node-kind-help">${escapeHtml(initialMeta.blurb || "")}</p>
       <div class="node-fields form-stack" id="node-fields">${nodeFieldsHtml(
         initialKind,
         node ? node.config : {},
-        node ? node.secrets : {}
+        node ? node.secrets : {},
+        editing
       )}</div>
       <p class="muted tiny">${
         editing
@@ -986,10 +1144,24 @@
         const meta = nodeKindMeta(kindSelect.value);
         const help = $("#node-kind-help", modal.body);
         if (help) help.textContent = meta.blurb || "";
-        $("#node-fields", modal.body).innerHTML = nodeFieldsHtml(kindSelect.value);
+        $("#node-fields", modal.body).innerHTML = nodeFieldsHtml(
+          kindSelect.value,
+          {},
+          {},
+          editing
+        );
         if (errorEl) errorEl.hidden = true;
       });
     }
+    modal.body.addEventListener("click", (event) => {
+      const oauth = event.target.closest("[data-oauth-connect]");
+      if (oauth) {
+        startOAuthConnect(oauth, modal);
+        return;
+      }
+      const browser = event.target.closest("[data-browser-login]");
+      if (browser) startBrowserLogin(browser, modal, editing ? node.id : null);
+    });
   }
 
   function initNodes() {
@@ -997,6 +1169,11 @@
     const addButton = $("#btn-add-node") || $("[data-add-node]");
     if (addButton) addButton.addEventListener("click", () => openNodeModal(null));
     document.addEventListener("click", (event) => {
+      const addKind = event.target.closest("[data-add-node-kind]");
+      if (addKind) {
+        openNodeModal(null, addKind.dataset.addNodeKind);
+        return;
+      }
       if (event.target.closest("[data-add-node]")) openNodeModal(null);
     });
     document.addEventListener("click", async (event) => {
